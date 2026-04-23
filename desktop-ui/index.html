@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SnakeHub可视化控制台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-a" aria-hidden="true"></div>
+    <div class="bg-orb orb-b" aria-hidden="true"></div>
+
+    <header class="hero">
+      <div>
+        <h1>SnakeHub可视化控制台</h1>
+        <p class="subtitle">
+          统一查看扫描结果、导入资源、合并候选和链接状态，覆盖 Claude、Cursor、Codex。
+        </p>
+      </div>
+      <div class="hero-actions">
+        <button id="refreshBtn" class="btn btn-strong">立即扫描并刷新</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section id="wizardPanel" class="panel wizard hidden">
+        <h2>首次向导</h2>
+        <ol>
+          <li><strong>扫描：</strong>检测已安装 AI 工具和现有资源。</li>
+          <li><strong>导入：</strong>创建或导入第一个 skill / hook / agent / command。</li>
+          <li><strong>链接：</strong>把资源映射到目标工具目录并验证。</li>
+        </ol>
+        <p id="wizardHint"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>扫描总览</h2>
+          <span id="summaryBadge" class="badge">加载中...</span>
+        </div>
+        <div id="overviewCards" class="cards"></div>
+        <div id="toolScanList" class="tool-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>工具目录浏览器</h2>
+          <div class="row">
+            <label>项目目录（可选，点击输入框选择）
+              <span class="path-picker">
+                <input id="toolScopePath" placeholder="未选择（默认全局）" readonly />
+                <button class="path-clear-btn" id="toolScopeClearBtn" type="button" aria-label="清空项目目录">✕</button>
+              </span>
+            </label>
+            <label>当前工具
+              <select id="toolBrowserSelect">
+                <option value="cursor">cursor</option>
+                <option value="claude">claude</option>
+                <option value="codex">codex</option>
+              </select>
+            </label>
+            <label>仅看某一类
+              <select id="toolBrowserTypeSelect">
+                <option value="skills" selected>skills</option>
+                <option value="hooks">hooks</option>
+                <option value="agents">agents</option>
+                <option value="commands">commands</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div id="toolBrowserMeta" class="tool-meta"></div>
+        <div id="toolBrowserContent" class="tool-browser-grid"></div>
+      </section>
+
+      <section class="panel">
+        <h2>GitLab 下载并导入中心仓库</h2>
+        <form id="repoScanForm" class="stack">
+          <label class="inline"><input id="repoMultiToolset" name="multiToolset" type="checkbox" checked /> 多端工具集</label>
+          <label>GitLab 地址（或本地 git 仓库路径）
+            <input name="repoUrl" placeholder="https://gitlab.com/group/repo.git" required />
+          </label>
+          <label>分支/Tag/Commit（可选）
+            <input name="ref" placeholder="main / release / commit" />
+          </label>
+          <label>下载目录（可选）
+            <span class="path-picker">
+              <input id="repoTargetPath" name="targetPath" placeholder="未选择（将使用默认受管目录）" readonly />
+              <button class="path-clear-btn" id="repoClearDirBtn" type="button" aria-label="清空下载目录">✕</button>
+            </span>
+          </label>
+          <div class="hint-line">
+            如果不选择，将下载到固定受管目录：<span class="mono">~/.snakehub/repos/&lt;repo-id&gt;</span>
+          </div>
+          <button class="btn btn-strong" type="submit">下载并扫描</button>
+        </form>
+
+        <div id="repoScanMeta" class="tool-meta"></div>
+        <div class="row">
+          <button class="btn" id="repoSelectAllBtn" type="button">全选全部</button>
+          <button class="btn" id="repoClearBtn" type="button">清空选择</button>
+          <button class="btn btn-strong" id="repoImportBtn" type="button">导入中心仓库</button>
+        </div>
+        <div id="repoCandidates" class="repo-candidates"></div>
+      </section>
+
+      <section class="panel">
+        <h2>从本地路径导入</h2>
+        <form id="localImportForm" class="stack">
+          <label>类型
+            <select name="type">
+              <option value="skill">skill</option>
+              <option value="hook">hook</option>
+              <option value="agent">agent</option>
+              <option value="command">command</option>
+            </select>
+          </label>
+          <label>路径 <input id="localPathInput" name="sourcePath" placeholder="~/Downloads/skill-folder" required /></label>
+          <label>名称（可选） <input name="name" placeholder="留空则自动推断" /></label>
+          <button class="btn btn-strong" type="submit">导入本地资源</button>
+        </form>
+        <div id="localDropZone" class="drop-zone">可将系统中文件夹路径拖拽到这里（会自动填入路径）</div>
+      </section>
+
+      <section class="panel">
+        <h2>从 Git 仓库导入</h2>
+        <form id="gitForm" class="stack">
+          <label>类型
+            <select name="type">
+              <option value="skill">skill</option>
+              <option value="hook">hook</option>
+              <option value="agent">agent</option>
+              <option value="command">command</option>
+            </select>
+          </label>
+          <label>仓库地址/路径 <input name="repoUrl" placeholder="https://github.com/org/repo 或 /local/repo" required /></label>
+          <label>Ref（可选） <input name="ref" placeholder="main / tag / commit" /></label>
+          <label>选择子路径（可选） <input name="select" placeholder="skills/writing" /></label>
+          <label class="inline"><input name="all" type="checkbox" /> 导入全部候选</label>
+          <label>名称覆盖（可选） <input name="name" placeholder="导入时统一命名" /></label>
+          <div class="row">
+            <button class="btn" id="gitListBtn" type="button">列出候选</button>
+            <button class="btn btn-strong" type="submit">执行导入</button>
+          </div>
+        </form>
+        <pre id="gitCandidates" class="box"></pre>
+      </section>
+
+      <section class="panel">
+        <h2>链接资源到工具</h2>
+        <div class="hint-line">当前链接范围：可在下方选择项目目录；不选则链接到全局目录。</div>
+        <form id="linkForm" class="stack">
+          <label>项目目录（可选，点击输入框选择）
+            <span class="path-picker">
+              <input id="linkScopePath" placeholder="未选择（默认全局）" readonly />
+              <button class="path-clear-btn" id="linkScopeClearBtn" type="button" aria-label="清空链接项目目录">✕</button>
+            </span>
+          </label>
+          <label class="inline">
+            <input id="linkAllModeToggle" type="checkbox" />
+            链接所有（按类型）
+          </label>
+          <label id="linkResourceRow">资源
+            <select id="resourceSelect" name="resourceToken" required></select>
+          </label>
+          <div id="linkAllTypesRow" class="row" style="display: none">
+            <label class="inline"><input type="checkbox" name="linkTypes" value="skills" checked /> skills</label>
+            <label class="inline"><input type="checkbox" name="linkTypes" value="commands" checked /> commands</label>
+            <label class="inline"><input type="checkbox" name="linkTypes" value="hooks" checked /> hooks</label>
+            <label class="inline"><input type="checkbox" name="linkTypes" value="agents" checked /> agents</label>
+          </div>
+          <label>工具
+            <select name="toolId">
+              <option value="claude">claude</option>
+              <option value="cursor">cursor</option>
+              <option value="codex">codex</option>
+            </select>
+          </label>
+          <label>别名（可选） <input name="aliasName" placeholder="留空则使用资源名" /></label>
+          <button id="linkCreateBtn" class="btn btn-strong" type="submit">创建链接</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>工具路径覆盖</h2>
+        <div id="pathTable" class="path-table"></div>
+        <form id="pathSetForm" class="stack compact">
+          <label>工具
+            <select name="toolId">
+              <option value="claude">claude</option>
+              <option value="cursor">cursor</option>
+              <option value="codex">codex</option>
+            </select>
+          </label>
+          <label>类型
+            <select name="type">
+              <option value="skill">skill</option>
+              <option value="hook">hook</option>
+              <option value="agent">agent</option>
+              <option value="command">command</option>
+            </select>
+          </label>
+          <label>目标路径 <input name="targetPath" placeholder="~/.codex/hooks" required /></label>
+          <div class="row">
+            <button class="btn btn-strong" type="submit">设置覆盖</button>
+            <button class="btn" id="pathUnsetBtn" type="button">取消覆盖</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="conflictSection" class="panel">
+        <div class="panel-head">
+          <h2>冲突工具展示</h2>
+          <span id="conflictSummary" class="badge">待扫描</span>
+        </div>
+        <div class="row">
+          <label>分类筛选
+            <select id="conflictTypeFilter">
+              <option value="all">全部</option>
+              <option value="skills">skills</option>
+              <option value="hooks">hooks</option>
+              <option value="agents">agents</option>
+              <option value="commands">commands</option>
+            </select>
+          </label>
+          <label>名称搜索
+            <input id="conflictSearchInput" placeholder="按名字检索冲突项" />
+          </label>
+        </div>
+        <div id="conflictToolTabs" class="tool-tabs"></div>
+        <div id="conflictList" class="conflict-list"></div>
+        <div id="conflictDetail" class="conflict-detail"></div>
+      </section>
+
+      <section class="panel wide">
+        <div class="panel-head">
+          <h2>操作日志</h2>
+          <button id="rollbackBtn" class="btn">回滚最近一次链接</button>
+        </div>
+        <pre id="eventLog" class="log-box"></pre>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

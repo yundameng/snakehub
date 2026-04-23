@@ -1,0 +1,64 @@
+{
+  "name": "snakehub",
+  "version": "0.1.0",
+  "description": "Local cross-tool AI assets hub (skills/hooks/agents/commands)",
+  "main": "electron-shell/main.js",
+  "bin": {
+    "snakehub": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "start": "node dist/index.js",
+    "desktop": "npm run build && electron electron-shell/main.js",
+    "desktop:web": "npm run build && node dist/desktop/server.js",
+    "desktop:web:raw": "node dist/desktop/server.js",
+    "desktop:raw": "electron electron-shell/main.js",
+    "dist:mac:dir": "npm run build && electron-builder --mac --dir --publish never",
+    "dist:mac": "npm run build && electron-builder --mac zip --publish never",
+    "dist:mac:dmg": "npm run build && electron-builder --mac dmg --publish never"
+  },
+  "keywords": [
+    "ai",
+    "skills",
+    "hooks",
+    "agents",
+    "commands",
+    "symlink"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "build": {
+    "appId": "com.opencow.snakehub",
+    "productName": "SnakeHub",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop-ui/**/*",
+      "electron-shell/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "afterSign": "electron-shell/notarize.js",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "electron-shell/entitlements.mac.plist",
+      "entitlementsInherit": "electron-shell/entitlements.mac.plist",
+      "target": [
+        "zip"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.1",
+    "@types/node": "^25.6.0",
+    "electron": "^37.1.0",
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.2"
+  }
+}
