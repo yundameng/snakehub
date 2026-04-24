@@ -1,10 +1,16 @@
 {
   "name": "snakehub",
-  "version": "0.1.0",
-  "description": "Local cross-tool AI assets hub (skills/hooks/agents/commands)",
+  "version": "0.1.2",
+  "description": "Local cross-tool AI assets hub (skills/hooks/agents/commands/rules)",
   "main": "electron-shell/main.js",
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
-    "snakehub": "dist/index.js"
+    "snakehub": "dist/index.js",
+    "cowhub": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -16,7 +22,8 @@
     "desktop:raw": "electron electron-shell/main.js",
     "dist:mac:dir": "npm run build && electron-builder --mac --dir --publish never",
     "dist:mac": "npm run build && electron-builder --mac zip --publish never",
-    "dist:mac:dmg": "npm run build && electron-builder --mac dmg --publish never"
+    "dist:mac:dmg": "npm run build && electron-builder --mac dmg --publish never",
+    "prepack": "npm run build && node scripts/prepare-bin.cjs"
   },
   "keywords": [
     "ai",

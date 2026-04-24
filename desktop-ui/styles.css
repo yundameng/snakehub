@@ -145,6 +145,11 @@ h3 {
   gap: 12px;
 }
 
+.panel-head-wrap {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
 .badge {
   padding: 6px 10px;
   border-radius: 999px;
@@ -255,6 +260,123 @@ h3 {
   min-height: 60px;
 }
 
+.repo-panel {
+  position: relative;
+  overflow: hidden;
+  min-height: 420px;
+}
+
+.repo-history-badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  border: 1px solid rgba(17, 100, 102, 0.55);
+  border-top-right-radius: 16px;
+  border-bottom-left-radius: 16px;
+  border-bottom-right-radius: 0;
+  border-top-left-radius: 0;
+  background: linear-gradient(180deg, #1f7f81, #116466);
+  color: #f7fffb;
+  padding: 8px 12px 7px;
+  font-weight: 700;
+  cursor: pointer;
+  z-index: 8;
+  transition: opacity 340ms ease, transform 340ms ease;
+}
+
+.repo-history-badge:hover {
+  filter: brightness(1.03);
+}
+
+.repo-panel.overlay-active .repo-history-badge,
+.repo-panel.overlay-open .repo-history-badge {
+  opacity: 0;
+  transform: translateY(-2px);
+  pointer-events: none;
+}
+
+.repo-history-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.34);
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 320ms ease;
+  z-index: 80;
+}
+
+body.repo-overlay-active .repo-history-backdrop {
+  visibility: visible;
+}
+
+body.repo-overlay-backdrop-visible .repo-history-backdrop {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+body.repo-overlay-backdrop-fast .repo-history-backdrop {
+  transition-duration: 120ms;
+}
+
+.repo-history-overlay {
+  position: fixed;
+  top: var(--repo-overlay-top, 96px);
+  right: var(--repo-overlay-right, 24px);
+  width: var(--repo-overlay-width, 720px);
+  height: var(--repo-overlay-height, 440px);
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  border: 1px solid rgba(17, 100, 102, 0.35);
+  border-radius: 14px;
+  background: rgba(255, 252, 246, 0.98);
+  box-shadow: 0 18px 46px rgba(18, 22, 28, 0.16);
+  padding: 10px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(0, 0) scaleX(0.09) scaleY(0.58);
+  transform-origin: top right;
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+  z-index: 90;
+  overflow: auto;
+}
+
+body.repo-overlay-active .repo-history-overlay,
+body.repo-overlay-open .repo-history-overlay {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(0, 0) scaleX(1) scaleY(1);
+}
+
+body.repo-overlay-open .repo-history-overlay,
+body.repo-overlay-wide .repo-history-overlay {
+  transition:
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease,
+    right 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.repo-history-overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.repo-history-actions {
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.repo-history-actions .btn {
+  padding: 7px 11px;
+  font-size: 12px;
+}
+
 .repo-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -360,6 +482,26 @@ h3 {
   border-color: rgba(17, 100, 102, 0.5);
   background: rgba(17, 100, 102, 0.12);
   color: #0d595b;
+}
+
+.import-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.local-import-pane {
+  display: none;
+  gap: 10px;
+}
+
+.local-import-pane.active {
+  display: grid;
+}
+
+.local-import-pane[hidden] {
+  display: none !important;
 }
 
 .conflict-list {
@@ -568,6 +710,81 @@ textarea {
   white-space: pre-wrap;
 }
 
+.operation-list {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  min-height: 92px;
+  max-height: 220px;
+  overflow: auto;
+  background: #fffdf9;
+  display: grid;
+  gap: 8px;
+}
+
+.operation-item {
+  border: 1px solid #ddd0bb;
+  border-radius: 10px;
+  padding: 8px;
+  background: #fff;
+  display: grid;
+  gap: 4px;
+}
+
+.operation-item.rollbackable {
+  cursor: pointer;
+}
+
+.operation-item.rollbackable:hover {
+  border-color: rgba(17, 100, 102, 0.5);
+  background: rgba(17, 100, 102, 0.05);
+}
+
+.operation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.operation-type {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid #d5c8b4;
+  background: #faf2e8;
+  color: #5e4932;
+}
+
+.operation-type.link {
+  border-color: rgba(17, 100, 102, 0.34);
+  background: rgba(17, 100, 102, 0.12);
+  color: #0d595b;
+}
+
+.operation-type.rollback {
+  border-color: rgba(224, 142, 69, 0.4);
+  background: rgba(224, 142, 69, 0.18);
+  color: #6d4500;
+}
+
+.operation-time,
+.operation-id,
+.operation-action {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.operation-summary {
+  color: #4f473f;
+  font-size: 12px;
+  word-break: break-all;
+}
+
 .path-table {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -681,6 +898,10 @@ textarea {
 
   .stack.compact {
     grid-template-columns: 1fr;
+  }
+
+  .import-tabs {
+    justify-content: flex-start;
   }
 
   .path-row {

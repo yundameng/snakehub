@@ -21,6 +21,7 @@ export function hubPaths(root = getHubRoot()) {
     hooksStore: path.join(root, "store", "hooks"),
     agentsStore: path.join(root, "store", "agents"),
     commandsStore: path.join(root, "store", "commands"),
+    rulesStore: path.join(root, "store", "rules"),
     links: path.join(root, "links"),
     repos: path.join(root, "repos"),
     db: path.join(root, "db"),
@@ -39,6 +40,7 @@ export async function ensureHubLayout(root = getHubRoot()): Promise<void> {
   await ensureDir(p.hooksStore);
   await ensureDir(p.agentsStore);
   await ensureDir(p.commandsStore);
+  await ensureDir(p.rulesStore);
   await ensureDir(p.links);
   await ensureDir(p.repos);
   await ensureDir(p.db);

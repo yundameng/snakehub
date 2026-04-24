@@ -1,8 +1,21 @@
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 function trimEnvValue(value: string | undefined): string {
   return (value ?? "").trim();
+}
+
+function resolveLaunchctlEnv(name: string): string {
+  try {
+    const raw = execFileSync("launchctl", ["getenv", name], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    });
+    return trimEnvValue(raw);
+  } catch {
+    return "";
+  }
 }
 
 export function resolveGitEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -24,6 +37,15 @@ export function resolveGitEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.
     }
   }
 
+  // GUI-launched apps on macOS may miss SSH_AUTH_SOCK even when Terminal has it.
+  // Pulling it from launchd lets git/ssh reach the user's agent keys.
+  if (process.platform === "darwin" && !trimEnvValue(env.SSH_AUTH_SOCK)) {
+    const launchdSock = resolveLaunchctlEnv("SSH_AUTH_SOCK");
+    if (launchdSock) {
+      env.SSH_AUTH_SOCK = launchdSock;
+    }
+  }
+
   return env;
 }
 
@@ -36,7 +58,7 @@ function normalizeErrorMessage(error: unknown): string {
 
 export function isGitAuthError(error: unknown): boolean {
   const message = normalizeErrorMessage(error);
-  return /The requested URL returned error:\s*(401|403)|Authentication failed|could not read Username|terminal prompts disabled|HTTP Basic: Access denied/i.test(
+  return /The requested URL returned error:\s*(401|403)|Authentication failed|could not read Username|terminal prompts disabled|HTTP Basic: Access denied|Permission denied \(publickey\)|Could not read from remote repository|Repository not found|fatal: could not read Password/i.test(
     message,
   );
 }
@@ -60,6 +82,67 @@ export function buildSshFallbackRepoUrl(repoUrl: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseSshRepoUrl(
+  repoUrl: string,
+): {
+  host: string;
+  port?: string;
+  repoPath: string;
+} | undefined {
+  const value = repoUrl.trim();
+  if (!value) {
+    return undefined;
+  }
+
+  if (value.startsWith("ssh://")) {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== "ssh:") {
+        return undefined;
+      }
+      const repoPath = normalizeRepoPath(parsed.pathname);
+      if (!parsed.hostname || !repoPath) {
+        return undefined;
+      }
+      return {
+        host: parsed.hostname.toLowerCase(),
+        port: parsed.port || undefined,
+        repoPath,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (/^[a-zA-Z]+:\/\//.test(value)) {
+    return undefined;
+  }
+
+  const scpLike = value.match(/^(?:[^@]+@)?([^:/]+):(.+)$/);
+  if (!scpLike) {
+    return undefined;
+  }
+  const [, host, repoPathRaw] = scpLike;
+  const repoPath = normalizeRepoPath(repoPathRaw);
+  if (!host || !repoPath) {
+    return undefined;
+  }
+
+  return {
+    host: host.toLowerCase(),
+    repoPath,
+  };
+}
+
+export function buildHttpsFallbackRepoUrl(repoUrl: string): string | undefined {
+  const parsed = parseSshRepoUrl(repoUrl);
+  if (!parsed) {
+    return undefined;
+  }
+  const port = parsed.port ? `:${parsed.port}` : "";
+  return `https://${parsed.host}${port}/${parsed.repoPath}`;
 }
 
 function normalizeRepoPath(repoPath: string): string {
@@ -112,9 +195,15 @@ export function annotateGitError(error: unknown): Error {
     );
   }
 
+  if (/Permission denied \(publickey\)/i.test(baseMessage)) {
+    return new Error(
+      `${baseMessage}\nHint: SSH authentication failed. If command-line git works but desktop app fails, ensure ssh-agent key access is available to GUI apps (SSH_AUTH_SOCK), or switch to an HTTPS repo URL.`,
+    );
+  }
+
   if (isGitAuthError(error)) {
     return new Error(
-      `${baseMessage}\nHint: git authentication failed. Configure your git credential helper or switch to an SSH repo URL.`,
+      `${baseMessage}\nHint: git authentication failed. Configure HTTPS credentials (credential helper/token), or configure SSH key access.`,
     );
   }
 

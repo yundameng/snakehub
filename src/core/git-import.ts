@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { shouldIgnoreName } from "./fs-utils";
-import { annotateGitError, buildSshFallbackRepoUrl, isGitAuthError, resolveGitEnv } from "./git-runtime";
+import {
+  annotateGitError,
+  buildHttpsFallbackRepoUrl,
+  buildSshFallbackRepoUrl,
+  isGitAuthError,
+  resolveGitEnv,
+} from "./git-runtime";
 import { importResource } from "./importer";
 import { ResourceType } from "./types";
 
@@ -56,11 +62,30 @@ async function cloneRepo(repoUrl: string, repoPath: string): Promise<void> {
   try {
     await runGit(["clone", "--depth", "1", repoUrl, repoPath]);
   } catch (error: unknown) {
-    const sshFallback = buildSshFallbackRepoUrl(repoUrl);
-    if (!sshFallback || !isGitAuthError(error)) {
+    if (!isGitAuthError(error)) {
       throw error;
     }
-    await runGit(["clone", "--depth", "1", sshFallback, repoPath]);
+
+    const fallbacks = [buildSshFallbackRepoUrl(repoUrl), buildHttpsFallbackRepoUrl(repoUrl)]
+      .map((item) => item?.trim() || "")
+      .filter(Boolean)
+      .filter((item, index, list) => item !== repoUrl && list.indexOf(item) === index);
+
+    let lastAuthError: unknown = error;
+    for (const fallbackUrl of fallbacks) {
+      await fs.rm(repoPath, { recursive: true, force: true }).catch(() => undefined);
+      try {
+        await runGit(["clone", "--depth", "1", fallbackUrl, repoPath]);
+        return;
+      } catch (fallbackError: unknown) {
+        if (!isGitAuthError(fallbackError)) {
+          throw fallbackError;
+        }
+        lastAuthError = fallbackError;
+      }
+    }
+
+    throw lastAuthError;
   }
 }
 

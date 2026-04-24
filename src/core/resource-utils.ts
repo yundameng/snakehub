@@ -15,7 +15,10 @@ export function normalizeResourceType(input: string): ResourceType {
   if (value === "command" || value === "commands") {
     return "commands";
   }
-  throw new Error(`Unknown resource type '${input}'. Use: skill|hook|agent|command`);
+  if (value === "rule" || value === "rules") {
+    return "rules";
+  }
+  throw new Error(`Unknown resource type '${input}'. Use: skill|hook|agent|command|rule`);
 }
 
 export function slugifyName(name: string): string {

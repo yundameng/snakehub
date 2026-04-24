@@ -1,4 +1,4 @@
-export type ResourceType = "skills" | "hooks" | "agents" | "commands";
+export type ResourceType = "skills" | "hooks" | "agents" | "commands" | "rules";
 
 export type OperationType = "import" | "link" | "rollback";
 

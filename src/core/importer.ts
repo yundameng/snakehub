@@ -11,6 +11,7 @@ function storeRootForType(type: ResourceType, root: string): string {
   if (type === "skills") return p.skillsStore;
   if (type === "hooks") return p.hooksStore;
   if (type === "agents") return p.agentsStore;
+  if (type === "rules") return p.rulesStore;
   return p.commandsStore;
 }
 

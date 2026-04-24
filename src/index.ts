@@ -56,22 +56,22 @@ function getStringFlag(flags: Record<string, FlagValue>, key: string): string | 
 function printHelp(): void {
   const root = getHubRoot();
   const help = `
-CowHub CLI (MVP)
+SnakeHub CLI (MVP)
 
 Hub root: ${root}
 
 Commands:
-  cowhub init
-  cowhub scan [--json]
-  cowhub fingerprint <path>
-  cowhub import --type <skill|hook|agent|command> --from <path> [--name <name>]
-  cowhub import-git --type <skill|hook|agent|command> --repo <url_or_path> [--ref <ref>] [--select <path_or_name>] [--all] [--list]
-  cowhub list [--json]
-  cowhub paths [--json]
-  cowhub paths set --tool <claude|cursor|codex> --type <skill|hook|agent|command> --path <dir>
-  cowhub paths unset --tool <claude|cursor|codex> --type <skill|hook|agent|command>
-  cowhub link --resource <resource_id_or_name> --tool <claude|cursor|codex> [--as <name>]
-  cowhub rollback [--op <operation_id>]
+  snakehub init
+  snakehub scan [--json]
+  snakehub fingerprint <path>
+  snakehub import --type <skill|hook|agent|command|rule> --from <path> [--name <name>]
+  snakehub import-git --type <skill|hook|agent|command|rule> --repo <url_or_path> [--ref <ref>] [--select <path_or_name>] [--all] [--list]
+  snakehub list [--json]
+  snakehub paths [--json]
+  snakehub paths set --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule> --path <dir>
+  snakehub paths unset --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule>
+  snakehub link --resource <resource_id_or_name> --tool <claude|cursor|codex> [--as <name>]
+  snakehub rollback [--op <operation_id>]
 `;
   process.stdout.write(help);
 }
@@ -86,14 +86,14 @@ async function run(): Promise<void> {
 
   if (parsed.command === "init") {
     await ensureHubLayout();
-    process.stdout.write(`Initialized cowhub at ${getHubRoot()}\n`);
+    process.stdout.write(`Initialized snakehub at ${getHubRoot()}\n`);
     return;
   }
 
   if (parsed.command === "fingerprint") {
     const inputPath = parsed.positional[0];
     if (!inputPath) {
-      throw new Error("Usage: cowhub fingerprint <path>");
+      throw new Error("Usage: snakehub fingerprint <path>");
     }
 
     const result = await fingerprintPath(inputPath);
@@ -108,7 +108,7 @@ async function run(): Promise<void> {
     const name = getStringFlag(parsed.flags, "name");
 
     if (!typeRaw || !from) {
-      throw new Error("Usage: cowhub import --type <skill|hook|agent|command> --from <path> [--name <name>]");
+      throw new Error("Usage: snakehub import --type <skill|hook|agent|command|rule> --from <path> [--name <name>]");
     }
 
     const result = await importResource({
@@ -138,7 +138,7 @@ async function run(): Promise<void> {
 
     if (!typeRaw || !repoUrl) {
       throw new Error(
-        "Usage: cowhub import-git --type <skill|hook|agent|command> --repo <url_or_path> [--ref <ref>] [--select <path_or_name>] [--all] [--list]",
+        "Usage: snakehub import-git --type <skill|hook|agent|command|rule> --repo <url_or_path> [--ref <ref>] [--select <path_or_name>] [--all] [--list]",
       );
     }
 
@@ -263,7 +263,7 @@ async function run(): Promise<void> {
       const targetPath = getStringFlag(parsed.flags, "path");
       if (!toolId || !typeRaw || !targetPath) {
         throw new Error(
-          "Usage: cowhub paths set --tool <claude|cursor|codex> --type <skill|hook|agent|command> --path <dir>",
+          "Usage: snakehub paths set --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule> --path <dir>",
         );
       }
       const type = normalizeResourceType(typeRaw);
@@ -276,7 +276,7 @@ async function run(): Promise<void> {
       const toolId = getStringFlag(parsed.flags, "tool");
       const typeRaw = getStringFlag(parsed.flags, "type");
       if (!toolId || !typeRaw) {
-        throw new Error("Usage: cowhub paths unset --tool <claude|cursor|codex> --type <skill|hook|agent|command>");
+        throw new Error("Usage: snakehub paths unset --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule>");
       }
       const type = normalizeResourceType(typeRaw);
       await unsetToolPathOverride({ toolId, type });
@@ -284,7 +284,7 @@ async function run(): Promise<void> {
       return;
     }
 
-    throw new Error("Usage: cowhub paths [--json] | cowhub paths set ... | cowhub paths unset ...");
+    throw new Error("Usage: snakehub paths [--json] | snakehub paths set ... | snakehub paths unset ...");
   }
 
   if (parsed.command === "link") {
@@ -294,7 +294,7 @@ async function run(): Promise<void> {
 
     if (!resourceToken || !toolId) {
       throw new Error(
-        "Usage: cowhub link --resource <resource_id_or_name> --tool <claude|cursor|codex> [--as <name>]",
+        "Usage: snakehub link --resource <resource_id_or_name> --tool <claude|cursor|codex> [--as <name>]",
       );
     }
 
@@ -326,7 +326,7 @@ async function run(): Promise<void> {
     return;
   }
 
-  throw new Error(`Unknown command '${parsed.command}'. Run 'cowhub help'.`);
+  throw new Error(`Unknown command '${parsed.command}'. Run 'snakehub help'.`);
 }
 
 run().catch((error: unknown) => {

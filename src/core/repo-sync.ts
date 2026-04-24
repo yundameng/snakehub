@@ -1,23 +1,27 @@
 import { execFile as execFileCb } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { ensureHubLayout, getHubRoot, hubPaths } from "./config";
 import {
   annotateGitError,
+  buildHttpsFallbackRepoUrl,
   buildSshFallbackRepoUrl,
   isGitAuthError,
   isSameRepoRemote,
   resolveGitEnv,
 } from "./git-runtime";
 import { archiveHooksWithConfig, resolveHooksConfigSibling } from "./hooks-config";
+import { archiveRulesWithCompanions, detectRulesCompanionsForImport } from "./rules-config";
 import { importResource } from "./importer";
 import { ResourceType } from "./types";
 
 const execFile = promisify(execFileCb);
-const RESOURCE_TYPES: ResourceType[] = ["skills", "commands", "hooks", "agents"];
+const RESOURCE_TYPES: ResourceType[] = ["skills", "commands", "hooks", "rules", "agents"];
 const TOOLSET_BUCKETS = new Set(["vue_tools", "mini_tools"]);
+const RULE_FILE_SUFFIXES = new Set([".md", ".mdc", ".rules"]);
 type RepoToolsetBucket = "vue_tools" | "mini_tools";
 
 export interface RepoCandidate {
@@ -34,6 +38,7 @@ export interface RepoScanResult {
   repoUrl: string;
   repoPath: string;
   multiToolset: boolean;
+  rulesCanonicalValidation: boolean;
   ref?: string;
   candidates: RepoCandidate[];
 }
@@ -67,6 +72,62 @@ function decorateCandidateName(name: string, bucket: RepoToolsetBucket | undefin
   return `${name} [${bucket}]`;
 }
 
+function isRulesCandidateFile(
+  type: Exclude<ResourceType, "skills">,
+  fileName: string,
+  rulesCanonicalValidation = false,
+): boolean {
+  if (type !== "rules") {
+    return true;
+  }
+  const ext = path.extname(fileName).toLowerCase();
+  if (rulesCanonicalValidation) {
+    return ext === ".md";
+  }
+  return RULE_FILE_SUFFIXES.has(ext);
+}
+
+async function collectRulesCandidatesFromBucket(input: {
+  repoPath: string;
+  bucketRoot: string;
+  bucket: RepoToolsetBucket;
+  multiToolset: boolean;
+  rulesCanonicalValidation?: boolean;
+}): Promise<RepoCandidate[]> {
+  const candidates: RepoCandidate[] = [];
+
+  async function walk(dirPath: string): Promise<void> {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+      const abs = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        await walk(abs);
+        continue;
+      }
+      if (!entry.isFile() || !isRulesCandidateFile("rules", entry.name, input.rulesCanonicalValidation)) {
+        continue;
+      }
+
+      const rel = normalizeRelativePath(path.relative(input.repoPath, abs));
+      const name = path.parse(entry.name).name || entry.name;
+      candidates.push({
+        key: `rules:${rel}`,
+        type: "rules",
+        name: decorateCandidateName(name, input.bucket, input.multiToolset),
+        relativePath: rel,
+        absolutePath: abs,
+        toolsetBucket: input.bucket,
+      });
+    }
+  }
+
+  await walk(input.bucketRoot);
+  return candidates;
+}
+
 async function runGit(args: string[], cwd?: string): Promise<string> {
   try {
     const result = await execFile("git", args, {
@@ -85,13 +146,30 @@ async function cloneRepo(repoUrl: string, repoPath: string): Promise<string> {
     await runGit(["clone", "--depth", "1", repoUrl, repoPath]);
     return repoUrl;
   } catch (error: unknown) {
-    const sshFallback = buildSshFallbackRepoUrl(repoUrl);
-    if (!sshFallback || !isGitAuthError(error)) {
+    if (!isGitAuthError(error)) {
       throw error;
     }
 
-    await runGit(["clone", "--depth", "1", sshFallback, repoPath]);
-    return sshFallback;
+    const fallbacks = [buildSshFallbackRepoUrl(repoUrl), buildHttpsFallbackRepoUrl(repoUrl)]
+      .map((item) => item?.trim() || "")
+      .filter(Boolean)
+      .filter((item, index, list) => item !== repoUrl && list.indexOf(item) === index);
+
+    let lastAuthError: unknown = error;
+    for (const fallbackUrl of fallbacks) {
+      await fs.rm(repoPath, { recursive: true, force: true }).catch(() => undefined);
+      try {
+        await runGit(["clone", "--depth", "1", fallbackUrl, repoPath]);
+        return fallbackUrl;
+      } catch (fallbackError: unknown) {
+        if (!isGitAuthError(fallbackError)) {
+          throw fallbackError;
+        }
+        lastAuthError = fallbackError;
+      }
+    }
+
+    throw lastAuthError;
   }
 }
 
@@ -163,6 +241,7 @@ async function findTypedCandidates(
   repoPath: string,
   type: Exclude<ResourceType, "skills">,
   multiToolset = false,
+  rulesCanonicalValidation = false,
 ): Promise<RepoCandidate[]> {
   const base = path.join(repoPath, type);
   try {
@@ -176,6 +255,45 @@ async function findTypedCandidates(
 
   const entries = await fs.readdir(base, { withFileTypes: true });
   const candidates: RepoCandidate[] = [];
+
+  if (type === "rules") {
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+
+      const abs = path.join(base, entry.name);
+      if (multiToolset && entry.isDirectory() && TOOLSET_BUCKETS.has(entry.name)) {
+        const bucket = entry.name as RepoToolsetBucket;
+        const bucketCandidates = await collectRulesCandidatesFromBucket({
+          repoPath,
+          bucketRoot: abs,
+          bucket,
+          multiToolset,
+          rulesCanonicalValidation,
+        });
+        candidates.push(...bucketCandidates);
+        continue;
+      }
+
+      if (!entry.isFile() || !isRulesCandidateFile("rules", entry.name, rulesCanonicalValidation)) {
+        continue;
+      }
+
+      const rel = normalizeRelativePath(path.relative(repoPath, abs));
+      const name = path.parse(entry.name).name || entry.name;
+      candidates.push({
+        key: `rules:${rel}`,
+        type: "rules",
+        name: decorateCandidateName(name, undefined, multiToolset),
+        relativePath: rel,
+        absolutePath: abs,
+      });
+    }
+
+    candidates.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+    return candidates;
+  }
 
   for (const entry of entries) {
     if (entry.name.startsWith(".")) {
@@ -204,6 +322,9 @@ async function findTypedCandidates(
           continue;
         }
         if (child.isFile()) {
+          if (!isRulesCandidateFile(type, child.name)) {
+            continue;
+          }
           const childName = path.parse(child.name).name || child.name;
           candidates.push({
             key: `${type}:${childRel}`,
@@ -233,6 +354,9 @@ async function findTypedCandidates(
     }
 
     if (entry.isFile()) {
+      if (!isRulesCandidateFile(type, entry.name)) {
+        continue;
+      }
       const name = path.parse(entry.name).name || entry.name;
       candidates.push({
         key: `${type}:${rel}`,
@@ -312,6 +436,7 @@ export async function scanRepoCandidates(input: {
   ref?: string;
   targetPath?: string;
   multiToolset?: boolean;
+  rulesCanonicalValidation?: boolean;
   root?: string;
 }): Promise<RepoScanResult> {
   let repoPath = input.repoPath ? path.resolve(input.repoPath) : "";
@@ -334,12 +459,14 @@ export async function scanRepoCandidates(input: {
   }
 
   const multiToolset = Boolean(input.multiToolset);
+  const rulesCanonicalValidation = Boolean(input.rulesCanonicalValidation);
   const skills = await findSkillCandidates(repoPath, multiToolset);
-  const commands = await findTypedCandidates(repoPath, "commands", multiToolset);
-  const hooks = await findTypedCandidates(repoPath, "hooks", multiToolset);
-  const agents = await findTypedCandidates(repoPath, "agents", multiToolset);
+  const commands = await findTypedCandidates(repoPath, "commands", multiToolset, rulesCanonicalValidation);
+  const hooks = await findTypedCandidates(repoPath, "hooks", multiToolset, rulesCanonicalValidation);
+  const rules = await findTypedCandidates(repoPath, "rules", multiToolset, rulesCanonicalValidation);
+  const agents = await findTypedCandidates(repoPath, "agents", multiToolset, rulesCanonicalValidation);
 
-  const candidates = [...skills, ...commands, ...hooks, ...agents];
+  const candidates = [...skills, ...commands, ...hooks, ...rules, ...agents];
   const unique = new Map<string, RepoCandidate>();
   for (const candidate of candidates) {
     unique.set(candidate.key, candidate);
@@ -355,6 +482,7 @@ export async function scanRepoCandidates(input: {
     repoUrl,
     repoPath,
     multiToolset,
+    rulesCanonicalValidation,
     ref: input.ref,
     candidates: [...unique.values()].sort((a, b) => a.key.localeCompare(b.key)),
   };
@@ -364,6 +492,7 @@ export async function importRepoCandidatesToHub(input: {
   repoPath: string;
   selectedKeys: string[];
   multiToolset?: boolean;
+  rulesCanonicalValidation?: boolean;
   root?: string;
 }): Promise<{
   imported: Array<{ key: string; type: ResourceType; name: string; reused: boolean; resourceId: string }>;
@@ -371,9 +500,18 @@ export async function importRepoCandidatesToHub(input: {
     snapshotDir: string;
     configFileName: string;
   };
+  rulesSnapshot?: {
+    snapshotDir: string;
+    companionFiles: string[];
+  };
 }> {
   const repoPath = path.resolve(input.repoPath);
-  const scan = await scanRepoCandidates({ repoPath, multiToolset: input.multiToolset, root: input.root });
+  const scan = await scanRepoCandidates({
+    repoPath,
+    multiToolset: input.multiToolset,
+    rulesCanonicalValidation: input.rulesCanonicalValidation,
+    root: input.root,
+  });
   const byKey = new Map(scan.candidates.map((candidate) => [candidate.key, candidate]));
 
   const selected = [...new Set(input.selectedKeys.map((key) => key.trim()).filter(Boolean))];
@@ -388,11 +526,24 @@ export async function importRepoCandidatesToHub(input: {
   if (hasHookSelection && selectedHookKeys.length !== allHookCandidates.length) {
     throw new Error("Hooks must be imported as a full set. Please select all hooks candidates.");
   }
+  const allRuleCandidates = scan.candidates.filter((candidate) => candidate.type === "rules");
+  const allRuleKeys = new Set(allRuleCandidates.map((candidate) => candidate.key));
+  const selectedRuleKeys = selected.filter((key) => allRuleKeys.has(key));
+  const hasRuleSelection = selectedRuleKeys.length > 0;
+  if (hasRuleSelection && selectedRuleKeys.length !== allRuleCandidates.length) {
+    throw new Error("Rules must be imported as a full set. Please select all rules candidates.");
+  }
 
   let hooksSnapshot:
     | {
         snapshotDir: string;
         configFileName: string;
+      }
+    | undefined;
+  let rulesSnapshot:
+    | {
+        snapshotDir: string;
+        companionFiles: string[];
       }
     | undefined;
   if (hasHookSelection) {
@@ -404,31 +555,87 @@ export async function importRepoCandidatesToHub(input: {
       root: input.root,
     });
   }
+  if (hasRuleSelection) {
+    const rulesDir = path.join(repoPath, "rules");
+    const companions = await detectRulesCompanionsForImport(rulesDir);
+    rulesSnapshot = await archiveRulesWithCompanions({
+      rulesDir: companions.rulesDir,
+      companionPaths: companions.companionPaths,
+      root: input.root,
+    });
+  }
 
   const imported: Array<{ key: string; type: ResourceType; name: string; reused: boolean; resourceId: string }> = [];
+  async function importCandidate(override: {
+    key: string;
+    type: ResourceType;
+    name: string;
+    sourcePath: string;
+    root?: string;
+  }): Promise<void> {
+    const result = await importResource({
+      type: override.type,
+      sourcePath: override.sourcePath,
+      name: override.name,
+      root: override.root,
+    });
+    imported.push({
+      key: override.key,
+      type: override.type,
+      name: override.name,
+      reused: result.reused,
+      resourceId: result.resource.id,
+    });
+  }
   for (const key of selected) {
     const candidate = byKey.get(key);
     if (!candidate) {
       continue;
     }
 
-    const result = await importResource({
-      type: candidate.type,
-      sourcePath: candidate.absolutePath,
-      name: candidate.name,
-      root: input.root,
-    });
+    if (input.rulesCanonicalValidation && candidate.type === "rules") {
+      const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "snakehub-rule-variant-"));
+      try {
+        await importCandidate({
+          key: candidate.key,
+          type: candidate.type,
+          name: candidate.name,
+          sourcePath: candidate.absolutePath,
+          root: input.root,
+        });
 
-    imported.push({
+        const baseName = path.parse(candidate.absolutePath).name || candidate.name;
+        const variants = [
+          { ext: ".mdc", suffix: "cursor" },
+          { ext: ".rules", suffix: "codex" },
+        ];
+        for (const variant of variants) {
+          const variantSourcePath = path.join(tempRoot, `${baseName}${variant.ext}`);
+          await fs.copyFile(candidate.absolutePath, variantSourcePath);
+          await importCandidate({
+            key: `${candidate.key}:${variant.suffix}`,
+            type: candidate.type,
+            name: candidate.name,
+            sourcePath: variantSourcePath,
+            root: input.root,
+          });
+        }
+      } finally {
+        await fs.rm(tempRoot, { recursive: true, force: true });
+      }
+      continue;
+    }
+
+    await importCandidate({
       key: candidate.key,
       type: candidate.type,
       name: candidate.name,
-      reused: result.reused,
-      resourceId: result.resource.id,
+      sourcePath: candidate.absolutePath,
+      root: input.root,
     });
   }
 
-  return { imported, hooksSnapshot };
+  return { imported, hooksSnapshot, rulesSnapshot };
 }
 
 export function resourceTypesOrder(): ResourceType[] {

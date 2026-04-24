@@ -13,6 +13,7 @@ const el = {
   linkScopeClearBtn: document.getElementById("linkScopeClearBtn"),
   resourceSelect: document.getElementById("resourceSelect"),
   eventLog: document.getElementById("eventLog"),
+  operationRecords: document.getElementById("operationRecords"),
   wizardPanel: document.getElementById("wizardPanel"),
   wizardHint: document.getElementById("wizardHint"),
   gitCandidates: document.getElementById("gitCandidates"),
@@ -25,18 +26,37 @@ const el = {
   conflictList: document.getElementById("conflictList"),
   conflictDetail: document.getElementById("conflictDetail"),
   localDropZone: document.getElementById("localDropZone"),
+  localRepoDropZone: document.getElementById("localRepoDropZone"),
   localPathInput: document.getElementById("localPathInput"),
+  localRepoPathInput: document.getElementById("localRepoPathInput"),
+  localRepoClearDirBtn: document.getElementById("localRepoClearDirBtn"),
+  localImportPanel: document.getElementById("localImportPanel"),
+  localImportTabs: document.getElementById("localImportTabs"),
+  localSingleTabBtn: document.getElementById("localSingleTabBtn"),
+  localRepoTabBtn: document.getElementById("localRepoTabBtn"),
+  localSingleImportPane: document.getElementById("localSingleImportPane"),
+  localRepoImportPane: document.getElementById("localRepoImportPane"),
   rollbackBtn: document.getElementById("rollbackBtn"),
   repoScanForm: document.getElementById("repoScanForm"),
+  repoPanel: document.getElementById("repoPanel"),
+  repoHistoryBadge: document.getElementById("repoHistoryBadge"),
+  repoHistoryCount: document.getElementById("repoHistoryCount"),
+  repoHistoryBackdrop: document.getElementById("repoHistoryBackdrop"),
+  repoHistoryOverlay: document.getElementById("repoHistoryOverlay"),
+  repoHistoryCloseBtn: document.getElementById("repoHistoryCloseBtn"),
   repoScanMeta: document.getElementById("repoScanMeta"),
   repoCandidates: document.getElementById("repoCandidates"),
   repoSelectAllBtn: document.getElementById("repoSelectAllBtn"),
   repoClearBtn: document.getElementById("repoClearBtn"),
   repoImportBtn: document.getElementById("repoImportBtn"),
   repoMultiToolset: document.getElementById("repoMultiToolset"),
+  repoRulesCanonical: document.getElementById("repoRulesCanonical"),
   repoTargetPath: document.getElementById("repoTargetPath"),
   repoClearDirBtn: document.getElementById("repoClearDirBtn"),
   localImportForm: document.getElementById("localImportForm"),
+  localRepoScanForm: document.getElementById("localRepoScanForm"),
+  localRepoMultiToolset: document.getElementById("localRepoMultiToolset"),
+  localRepoRulesCanonical: document.getElementById("localRepoRulesCanonical"),
   gitForm: document.getElementById("gitForm"),
   gitListBtn: document.getElementById("gitListBtn"),
   linkForm: document.getElementById("linkForm"),
@@ -51,6 +71,7 @@ const el = {
 const typeText = {
   skills: "skill",
   hooks: "hook",
+  rules: "rule",
   agents: "agent",
   commands: "command",
 };
@@ -64,6 +85,7 @@ const sourceText = {
 
 let currentOverview = null;
 let toolBrowserPickMap = new Map();
+let toolBrowserTypePickMap = new Map();
 let currentBrowserScopePath = "";
 let currentLinkScopePath = "";
 let repoScanState = {
@@ -72,6 +94,7 @@ let repoScanState = {
   repoUrl: "",
   ref: "",
   multiToolset: false,
+  rulesCanonicalValidation: true,
   candidates: [],
   selectedKeys: new Set(),
 };
@@ -83,11 +106,210 @@ let selectedConflictType = "all";
 let selectedConflictSearch = "";
 let selectedConflictId = "";
 let localBatchImportContext = null;
+let localImportTab = "single";
+const REPO_HISTORY_STORAGE_KEY = "snakehub_repo_history_v1";
+const REPO_OVERLAY_EXPAND_MS = 280;
+const REPO_OVERLAY_WIDE_DELAY_MS = 140;
+const REPO_OVERLAY_BACKDROP_SHOW_DELAY_MS = 40;
+const REPO_OVERLAY_BACKDROP_FADE_OUT_MS = 120;
+const REPO_OVERLAY_SHRINK_MS = 280;
+let repoHistoryEntries = [];
+let repoOverlayOpenTimer = 0;
+let repoOverlayWideTimer = 0;
+let repoOverlayBackdropTimer = 0;
+let repoOverlayCloseTimer = 0;
+let repoOverlayHideTimer = 0;
+let repoOverlayWide = false;
+let rollbackBusy = false;
+const REPO_GROUP_ONLY_TYPES = new Set(["hooks", "rules"]);
 
 function setRepoActionButtonsEnabled(enabled) {
   if (el.repoSelectAllBtn) el.repoSelectAllBtn.disabled = !enabled;
   if (el.repoClearBtn) el.repoClearBtn.disabled = !enabled;
   if (el.repoImportBtn) el.repoImportBtn.disabled = !enabled;
+}
+
+function loadRepoHistoryEntries() {
+  try {
+    const raw = window.localStorage.getItem(REPO_HISTORY_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((item) => ({
+        repoId: String(item.repoId || ""),
+        repoUrl: String(item.repoUrl || ""),
+        repoPath: String(item.repoPath || ""),
+        scannedAt: Number(item.scannedAt || 0),
+      }))
+      .filter((item) => item.repoId || item.repoUrl || item.repoPath);
+  } catch {
+    return [];
+  }
+}
+
+function saveRepoHistoryEntries() {
+  try {
+    window.localStorage.setItem(REPO_HISTORY_STORAGE_KEY, JSON.stringify(repoHistoryEntries.slice(0, 100)));
+  } catch {
+    // Ignore localStorage write failures.
+  }
+}
+
+function renderRepoHistoryCount() {
+  if (el.repoHistoryCount) {
+    const count = Array.isArray(repoScanState.candidates) ? repoScanState.candidates.length : 0;
+    el.repoHistoryCount.textContent = String(count);
+  }
+}
+
+function recordRepoHistoryEntry(entry) {
+  const key = entry.repoId || entry.repoUrl || entry.repoPath;
+  if (!key) {
+    return;
+  }
+  repoHistoryEntries = repoHistoryEntries.filter((item) => (item.repoId || item.repoUrl || item.repoPath) !== key);
+  repoHistoryEntries.unshift({
+    repoId: entry.repoId || "",
+    repoUrl: entry.repoUrl || "",
+    repoPath: entry.repoPath || "",
+    scannedAt: Date.now(),
+  });
+  saveRepoHistoryEntries();
+  renderRepoHistoryCount();
+}
+
+function clearRepoOverlayTimers() {
+  if (repoOverlayOpenTimer) {
+    window.clearTimeout(repoOverlayOpenTimer);
+    repoOverlayOpenTimer = 0;
+  }
+  if (repoOverlayBackdropTimer) {
+    window.clearTimeout(repoOverlayBackdropTimer);
+    repoOverlayBackdropTimer = 0;
+  }
+  if (repoOverlayWideTimer) {
+    window.clearTimeout(repoOverlayWideTimer);
+    repoOverlayWideTimer = 0;
+  }
+  if (repoOverlayCloseTimer) {
+    window.clearTimeout(repoOverlayCloseTimer);
+    repoOverlayCloseTimer = 0;
+  }
+  if (repoOverlayHideTimer) {
+    window.clearTimeout(repoOverlayHideTimer);
+    repoOverlayHideTimer = 0;
+  }
+}
+
+function isRepoHistoryOverlayVisible() {
+  return document.body.classList.contains("repo-overlay-active") || document.body.classList.contains("repo-overlay-open");
+}
+
+function updateRepoHistoryOverlayLayout() {
+  if (!el.repoPanel || !el.repoHistoryOverlay) {
+    return;
+  }
+  const anchorRect = el.repoPanel.getBoundingClientRect();
+  const rawTop = Math.round(anchorRect.top - 1);
+  const left = Math.max(8, Math.round(anchorRect.left - 1));
+  const rawHeight = Math.round(anchorRect.height + 2);
+  const top = Math.max(0, rawTop);
+  let rightEdge = Math.round(anchorRect.right + 1);
+  if (repoOverlayWide && el.localImportPanel) {
+    const importRect = el.localImportPanel.getBoundingClientRect();
+    if (importRect.width > 0) {
+      rightEdge = Math.max(rightEdge, Math.round(importRect.right + 1));
+    }
+  }
+  const maxRightEdge = window.innerWidth - 8;
+  rightEdge = Math.min(maxRightEdge, rightEdge);
+  const width = Math.max(360, rightEdge - left);
+  const right = Math.max(8, Math.round(window.innerWidth - rightEdge));
+  const maxHeightByViewport = window.innerHeight - top - 8;
+  const height = Math.max(280, Math.min(rawHeight, maxHeightByViewport));
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-top", `${top}px`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-right", `${right}px`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-width", `${width}px`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-height", `${height}px`);
+}
+
+function openRepoHistoryOverlay() {
+  if (!el.repoPanel || !el.repoHistoryOverlay) {
+    return;
+  }
+  clearRepoOverlayTimers();
+  repoOverlayWide = false;
+  document.body.classList.remove("repo-overlay-wide");
+  updateRepoHistoryOverlayLayout();
+
+  el.repoPanel.classList.remove("overlay-open");
+  el.repoPanel.classList.add("overlay-active");
+  document.body.classList.remove("repo-overlay-backdrop-fast");
+  document.body.classList.remove("repo-overlay-backdrop-visible");
+  document.body.classList.remove("repo-overlay-open");
+  document.body.classList.add("repo-overlay-active");
+  el.repoHistoryOverlay.setAttribute("aria-hidden", "false");
+  if (el.repoHistoryBackdrop) {
+    el.repoHistoryBackdrop.setAttribute("aria-hidden", "false");
+  }
+
+  repoOverlayOpenTimer = window.setTimeout(() => {
+    el.repoPanel.classList.add("overlay-open");
+    document.body.classList.add("repo-overlay-open");
+    repoOverlayWideTimer = window.setTimeout(() => {
+      repoOverlayWide = true;
+      document.body.classList.add("repo-overlay-wide");
+      updateRepoHistoryOverlayLayout();
+      repoOverlayWideTimer = 0;
+    }, REPO_OVERLAY_WIDE_DELAY_MS);
+    repoOverlayOpenTimer = 0;
+  }, REPO_OVERLAY_EXPAND_MS);
+  repoOverlayBackdropTimer = window.setTimeout(() => {
+    document.body.classList.add("repo-overlay-backdrop-visible");
+    repoOverlayBackdropTimer = 0;
+  }, REPO_OVERLAY_EXPAND_MS + REPO_OVERLAY_BACKDROP_SHOW_DELAY_MS);
+}
+
+function closeRepoHistoryOverlay() {
+  if (!el.repoPanel || !el.repoHistoryOverlay) {
+    return;
+  }
+  clearRepoOverlayTimers();
+  repoOverlayWide = false;
+  document.body.classList.remove("repo-overlay-wide");
+
+  document.body.classList.add("repo-overlay-backdrop-fast");
+  document.body.classList.remove("repo-overlay-backdrop-visible");
+
+  repoOverlayCloseTimer = window.setTimeout(() => {
+    el.repoPanel.classList.remove("overlay-open");
+    document.body.classList.remove("repo-overlay-open");
+    el.repoPanel.classList.remove("overlay-active");
+    document.body.classList.remove("repo-overlay-active");
+    repoOverlayCloseTimer = 0;
+
+    repoOverlayHideTimer = window.setTimeout(() => {
+      el.repoHistoryOverlay.setAttribute("aria-hidden", "true");
+      if (el.repoHistoryBackdrop) {
+        el.repoHistoryBackdrop.setAttribute("aria-hidden", "true");
+      }
+      document.body.classList.remove("repo-overlay-backdrop-fast");
+      repoOverlayHideTimer = 0;
+    }, REPO_OVERLAY_SHRINK_MS);
+  }, REPO_OVERLAY_BACKDROP_FADE_OUT_MS);
+}
+
+function toggleRepoHistoryOverlay() {
+  if (isRepoHistoryOverlayVisible()) {
+    closeRepoHistoryOverlay();
+  } else {
+    openRepoHistoryOverlay();
+  }
 }
 
 function readTrimmedInputValue(form, selector) {
@@ -99,6 +321,36 @@ function readTrimmedInputValue(form, selector) {
     return input.value.trim();
   }
   return "";
+}
+
+function activateLocalImportTab(tabValue) {
+  const nextTab = tabValue === "repo" ? "repo" : "single";
+  localImportTab = nextTab;
+  const singleActive = nextTab === "single";
+  const repoActive = nextTab === "repo";
+
+  if (el.localSingleTabBtn) {
+    el.localSingleTabBtn.classList.toggle("active", singleActive);
+    el.localSingleTabBtn.setAttribute("aria-selected", String(singleActive));
+  }
+  if (el.localRepoTabBtn) {
+    el.localRepoTabBtn.classList.toggle("active", repoActive);
+    el.localRepoTabBtn.setAttribute("aria-selected", String(repoActive));
+  }
+
+  if (el.localSingleImportPane) {
+    el.localSingleImportPane.classList.toggle("active", singleActive);
+    el.localSingleImportPane.hidden = !singleActive;
+  }
+  if (el.localRepoImportPane) {
+    el.localRepoImportPane.classList.toggle("active", repoActive);
+    el.localRepoImportPane.hidden = !repoActive;
+  }
+
+  if (repoActive) {
+    localBatchImportContext = null;
+  }
+  updateActionButtonsState();
 }
 
 function updateRepoScanButtonState() {
@@ -123,6 +375,18 @@ function updateLocalImportButtonState() {
   }
   const sourcePath = readTrimmedInputValue(el.localImportForm, 'input[name="sourcePath"]');
   submitBtn.disabled = !sourcePath;
+}
+
+function updateLocalRepoScanButtonState() {
+  if (!el.localRepoScanForm) {
+    return;
+  }
+  const submitBtn = el.localRepoScanForm.querySelector("button[type=submit]");
+  if (!(submitBtn instanceof HTMLButtonElement)) {
+    return;
+  }
+  const repoPath = readTrimmedInputValue(el.localRepoScanForm, 'input[name="repoPath"]');
+  submitBtn.disabled = !repoPath;
 }
 
 function updateGitImportButtonsState() {
@@ -174,6 +438,7 @@ function updatePathSetButtonsState() {
 function updateActionButtonsState() {
   updateRepoScanButtonState();
   updateLocalImportButtonState();
+  updateLocalRepoScanButtonState();
   updateGitImportButtonsState();
   updateLinkCreateButtonState();
   updatePathSetButtonsState();
@@ -189,6 +454,7 @@ function getErrorMessage(error) {
 function toSingleType(typeValue) {
   if (typeValue === "skills") return "skill";
   if (typeValue === "hooks") return "hook";
+  if (typeValue === "rules") return "rule";
   if (typeValue === "agents") return "agent";
   if (typeValue === "commands") return "command";
   return typeValue;
@@ -197,6 +463,7 @@ function toSingleType(typeValue) {
 function toPluralType(typeValue) {
   if (typeValue === "skill" || typeValue === "skills") return "skills";
   if (typeValue === "hook" || typeValue === "hooks") return "hooks";
+  if (typeValue === "rule" || typeValue === "rules") return "rules";
   if (typeValue === "agent" || typeValue === "agents") return "agents";
   if (typeValue === "command" || typeValue === "commands") return "commands";
   return typeValue;
@@ -211,9 +478,102 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function detectRuleToolByPath(filePath) {
+  const normalized = String(filePath || "").trim().toLowerCase();
+  if (normalized.endsWith(".mdc")) return "cursor";
+  if (normalized.endsWith(".md")) return "claude";
+  if (normalized.endsWith(".rules")) return "codex";
+  return "";
+}
+
+function renderRuleToolBadgeByPath(type, filePath) {
+  if (type !== "rules") {
+    return "";
+  }
+  const toolTag = detectRuleToolByPath(filePath);
+  if (!toolTag) {
+    return "";
+  }
+  return ` <span class="asset-tag linked">${escapeHtml(toolTag)}</span>`;
+}
+
+function expectedRuleExtensionForTool(toolId) {
+  if (toolId === "cursor") return ".mdc";
+  if (toolId === "claude") return ".md";
+  if (toolId === "codex") return ".rules";
+  return "";
+}
+
 function log(message) {
   const ts = new Date().toLocaleTimeString();
   el.eventLog.textContent = `[${ts}] ${message}\n${el.eventLog.textContent}`.slice(0, 12000);
+}
+
+function formatOperationTime(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso || "-";
+  }
+  return date.toLocaleString();
+}
+
+function renderOperationRecords(operations) {
+  if (!el.operationRecords) {
+    return;
+  }
+
+  const list = Array.isArray(operations) ? operations.slice().reverse() : [];
+  if (list.length === 0) {
+    el.operationRecords.innerHTML = `<div class="asset-empty">暂无可展示的操作记录。</div>`;
+    return;
+  }
+
+  const operationTypeText = {
+    import: "导入",
+    link: "链接",
+    rollback: "回滚",
+  };
+
+  el.operationRecords.innerHTML = list
+    .map((op) => {
+      const details = op && typeof op === "object" ? op.details || {} : {};
+      const opType = String(op.type || "");
+      const operationId = String(op.id || "");
+      const linkPath = String(details.linkPath || "");
+      const toolId = String(details.toolId || "");
+      const sourcePath = String(details.sourcePath || "");
+      const sourceOperationId = String(details.sourceOperationId || "");
+      const typeLabel = operationTypeText[opType] || opType || "未知";
+
+      let summary = "";
+      if (opType === "link") {
+        summary = `${toolId ? `${toolId} · ` : ""}${linkPath || "(缺少 linkPath)"}`;
+      } else if (opType === "rollback") {
+        summary = `${linkPath || "(缺少 linkPath)"}${sourceOperationId ? ` · 来源 ${sourceOperationId}` : ""}`;
+      } else {
+        summary = sourcePath || "(无附加信息)";
+      }
+
+      const rollbackable = opType === "link" && operationId && linkPath;
+      const rollbackClass = rollbackable ? " rollbackable" : "";
+      const rollbackData = rollbackable
+        ? ` data-operation-id="${escapeHtml(operationId)}" data-link-path="${escapeHtml(linkPath)}"`
+        : "";
+      const rollbackHint = rollbackable ? `<div class="operation-action">点击回滚此条</div>` : "";
+
+      return `
+        <article class="operation-item${rollbackClass}"${rollbackData}>
+          <div class="operation-head">
+            <span class="operation-type ${escapeHtml(opType)}">${escapeHtml(typeLabel)}</span>
+            <span class="operation-time">${escapeHtml(formatOperationTime(String(op.createdAt || "")))}</span>
+          </div>
+          <div class="operation-summary mono">${escapeHtml(summary)}</div>
+          <div class="operation-id">ID: <span class="mono">${escapeHtml(operationId)}</span></div>
+          ${rollbackHint}
+        </article>
+      `;
+    })
+    .join("");
 }
 
 function getBrowserScopePayload() {
@@ -564,11 +924,12 @@ function renderCards(state, scan) {
 }
 
 function renderHubStoreResources(resources) {
-  const order = ["skills", "commands", "hooks", "agents"];
+  const order = ["skills", "commands", "hooks", "rules", "agents"];
   const grouped = {
     skills: [],
     commands: [],
     hooks: [],
+    rules: [],
     agents: [],
   };
 
@@ -591,7 +952,7 @@ function renderHubStoreResources(resources) {
           (item) => `
           <li class="hub-row">
             <div class="hub-row-head">
-              <span class="mono">${escapeHtml(item.name)}</span>
+              <span class="mono">${escapeHtml(item.name)}</span>${renderRuleToolBadgeByPath(item.type, item.sourcePath)}
               <span class="hub-row-id">${escapeHtml(item.id)}</span>
             </div>
             <div class="asset-path">${escapeHtml(item.storePath)}</div>
@@ -620,15 +981,37 @@ function renderHubStoreResources(resources) {
 }
 
 function renderResourceOptions(resources) {
-  if (resources.length === 0) {
+  const previousValue = el.resourceSelect ? String(el.resourceSelect.value || "") : "";
+  const toolSelect = el.linkForm ? el.linkForm.querySelector('select[name="toolId"]') : null;
+  const toolId = toolSelect instanceof HTMLSelectElement ? toolSelect.value.trim() : "";
+  const expectedRuleExt = expectedRuleExtensionForTool(toolId);
+
+  const filtered = resources.filter((resource) => {
+    if (resource.type !== "rules") {
+      return true;
+    }
+    if (!expectedRuleExt) {
+      return true;
+    }
+    return String(resource.sourcePath || "").toLowerCase().endsWith(expectedRuleExt);
+  });
+
+  if (filtered.length === 0) {
     el.resourceSelect.innerHTML = `<option value="">（当前无可链接资源）</option>`;
     updateLinkCreateButtonState();
     return;
   }
 
-  el.resourceSelect.innerHTML = resources
-    .map((r) => `<option value="${r.id}">${r.name}（${r.type}）</option>`)
+  el.resourceSelect.innerHTML = filtered
+    .map((r) => {
+      const toolTag = r.type === "rules" ? detectRuleToolByPath(r.sourcePath) : "";
+      const label = toolTag ? `${r.name}（${r.type}/${toolTag}）` : `${r.name}（${r.type}）`;
+      return `<option value="${r.id}">${escapeHtml(label)}</option>`;
+    })
     .join("");
+  if (previousValue && filtered.some((resource) => resource.id === previousValue)) {
+    el.resourceSelect.value = previousValue;
+  }
   updateLinkCreateButtonState();
 }
 
@@ -636,7 +1019,8 @@ function typeSortOrder(type) {
   if (type === "skills") return 0;
   if (type === "commands") return 1;
   if (type === "hooks") return 2;
-  if (type === "agents") return 3;
+  if (type === "rules") return 3;
+  if (type === "agents") return 4;
   return 99;
 }
 
@@ -645,6 +1029,7 @@ function renderRepoCandidates() {
   if (!candidates || candidates.length === 0) {
     el.repoCandidates.innerHTML = `<div class="asset-empty">尚未扫描到可导入项</div>`;
     setRepoActionButtonsEnabled(false);
+    renderRepoHistoryCount();
     return;
   }
 
@@ -655,28 +1040,64 @@ function renderRepoCandidates() {
     grouped.set(item.type, list);
   }
 
+  for (const type of REPO_GROUP_ONLY_TYPES) {
+    const list = grouped.get(type) || [];
+    if (list.length === 0) {
+      continue;
+    }
+    const selectedCount = list.filter((item) => selectedKeys.has(item.key)).length;
+    if (selectedCount > 0 && selectedCount < list.length) {
+      list.forEach((item) => selectedKeys.add(item.key));
+    }
+  }
+
   const sections = [...grouped.entries()]
     .sort((a, b) => typeSortOrder(a[0]) - typeSortOrder(b[0]))
     .map(([type, list]) => {
       list.sort((x, y) => x.relativePath.localeCompare(y.relativePath));
+      const groupOnly = REPO_GROUP_ONLY_TYPES.has(type);
+      const allChecked = list.length > 0 && list.every((item) => selectedKeys.has(item.key));
       const rows = list
         .map((item) => {
           const checked = selectedKeys.has(item.key) ? "checked" : "";
+          const badge = renderRuleToolBadgeByPath(type, item.relativePath);
           return `
+            ${
+              groupOnly
+                ? `
+            <div class="repo-item">
+              <span class="repo-item-body">
+                <span class="mono">${escapeHtml(item.name)}</span>${badge}
+                <span class="asset-path">${escapeHtml(item.relativePath)}</span>
+              </span>
+            </div>
+            `
+                : `
             <label class="repo-item">
               <input type="checkbox" class="repo-candidate-check" data-key="${escapeHtml(item.key)}" ${checked} />
               <span class="repo-item-body">
-                <span class="mono">${escapeHtml(item.name)}</span>
+                <span class="mono">${escapeHtml(item.name)}</span>${badge}
                 <span class="asset-path">${escapeHtml(item.relativePath)}</span>
               </span>
             </label>
+            `
+            }
           `;
         })
         .join("");
 
       return `
         <section class="repo-group">
-          <div class="repo-group-title">${type}（${list.length}）</div>
+          ${
+            groupOnly
+              ? `
+          <label class="repo-group-title">
+            <input type="checkbox" class="repo-type-check" data-type="${escapeHtml(type)}" ${allChecked ? "checked" : ""} />
+            ${escapeHtml(type)}（${list.length}）
+          </label>
+          `
+              : `<div class="repo-group-title">${type}（${list.length}）</div>`
+          }
           <div class="repo-group-list">${rows}</div>
         </section>
       `;
@@ -687,12 +1108,14 @@ function renderRepoCandidates() {
   if (el.repoSelectAllBtn) el.repoSelectAllBtn.disabled = false;
   if (el.repoClearBtn) el.repoClearBtn.disabled = false;
   if (el.repoImportBtn) el.repoImportBtn.disabled = selectedKeys.size === 0;
+  renderRepoHistoryCount();
 }
 
 function groupAssetsByType(assets) {
   const map = {
     skills: [],
     hooks: [],
+    rules: [],
     agents: [],
     commands: [],
   };
@@ -721,6 +1144,7 @@ function renderToolBrowser() {
     el.toolBrowserMeta.textContent = `未找到工具 ${selectedToolId} 的扫描数据。`;
     el.toolBrowserContent.innerHTML = "";
     toolBrowserPickMap = new Map();
+    toolBrowserTypePickMap = new Map();
     return;
   }
 
@@ -728,6 +1152,7 @@ function renderToolBrowser() {
     el.toolBrowserMeta.textContent = `${tool.toolName}（${tool.toolId}）当前未检测到。`;
     el.toolBrowserContent.innerHTML = "";
     toolBrowserPickMap = new Map();
+    toolBrowserTypePickMap = new Map();
     return;
   }
 
@@ -742,7 +1167,7 @@ function renderToolBrowser() {
     .join(" | ");
   const list = byType[selectedType] || [];
   const selectedTypePath = pathItems.find((item) => item.type === selectedType)?.path || "";
-  const showItemPickButton = selectedType !== "hooks";
+  const canPickItemByType = selectedType !== "hooks" && selectedType !== "rules";
   const selectedTypeLabel = typeText[selectedType] || selectedType;
   el.toolBrowserMeta.textContent =
     `${tool.toolName}（${tool.toolId}）` +
@@ -750,10 +1175,11 @@ function renderToolBrowser() {
     ` · 目录：${pathHint || "无路径信息"}`;
 
   const nextPickMap = new Map();
+  const linkedSourcePaths = [];
+  let importableCount = 0;
   const items = list
     .map((asset, index) => {
       const pickKey = `${selectedToolId}:${selectedType}:${index}`;
-      nextPickMap.set(pickKey, asset);
       const assetKey = `${selectedToolId}|${asset.path}`;
       const linkedMapping = (currentOverview.state.mappings || []).find(
         (mapping) =>
@@ -764,7 +1190,17 @@ function renderToolBrowser() {
           mapping.resourceId === asset.duplicateResourceId,
       );
       const isLinkedByCowHub = Boolean(linkedMapping);
+      if (isLinkedByCowHub) {
+        linkedSourcePaths.push(asset.path);
+      } else {
+        importableCount += 1;
+      }
+      const showItemPickButton = canPickItemByType && !isLinkedByCowHub;
+      if (showItemPickButton) {
+        nextPickMap.set(pickKey, asset);
+      }
       const mergeConflictId = mergeConflictIdByAssetKey.get(assetKey);
+      const ruleToolBadge = renderRuleToolBadgeByPath(asset.type, asset.path);
       let statusTag = "";
       if (isLinkedByCowHub) {
         statusTag = ` <span class="asset-tag linked">已链接</span>`;
@@ -784,7 +1220,7 @@ function renderToolBrowser() {
       return `
         <li class="asset-row">
           <div class="asset-row-head">
-            <span class="mono">${escapeHtml(asset.name)}</span>${statusTag}
+            <span class="mono">${escapeHtml(asset.name)}</span>${ruleToolBadge}${statusTag}
             ${
               showItemPickButton
                 ? `
@@ -806,22 +1242,39 @@ function renderToolBrowser() {
     })
     .join("");
   toolBrowserPickMap = nextPickMap;
+  const typeDirPickKey = `${selectedToolId}:${selectedType}:${selectedTypePath || "-"}`;
+  const canPickTypeDir = Boolean(selectedTypePath) && importableCount > 0;
+  const nextTypePickMap = new Map();
+  if (canPickTypeDir) {
+    nextTypePickMap.set(typeDirPickKey, {
+      type: selectedType,
+      sourcePath: selectedTypePath,
+      excludeSourcePaths: linkedSourcePaths,
+    });
+  }
+  toolBrowserTypePickMap = nextTypePickMap;
 
   el.toolBrowserContent.innerHTML = `
     <article class="browser-col">
       <div class="browser-type-head">
         <h3>${selectedType}（${list.length}）</h3>
+        ${
+          canPickTypeDir
+            ? `
         <button
           type="button"
           class="asset-pick-btn type-dir-pick-btn"
           data-type="${escapeHtml(selectedType)}"
           data-tool-id="${escapeHtml(selectedToolId)}"
           data-type-dir-path="${escapeHtml(selectedTypePath)}"
-          title="填入“从本地路径导入”并按该类型启用批量导入/批量链接"
-          ${selectedTypePath ? "" : "disabled"}
+          data-type-pick-key="${escapeHtml(typeDirPickKey)}"
+          title="填入“从本地路径导入”并按该类型启用批量导入/批量链接（已链接项将自动跳过）"
         >
           ->
         </button>
+        `
+            : ""
+        }
       </div>
       ${items ? `<ul class="asset-list">${items}</ul>` : `<div class="asset-empty">当前无 ${selectedType}</div>`}
     </article>
@@ -888,12 +1341,17 @@ async function refreshOverview(mode = "auto") {
   renderCards(state, scan);
   renderHubStoreResources(state.resources);
   renderResourceOptions(state.resources);
+  renderOperationRecords(state.operations);
   renderPaths(paths);
   buildConflictRecords();
   renderToolBrowser();
   renderConflictModule();
   renderWizard(state, scan);
   renderScopeInputs();
+  updateActionButtonsState();
+  if (isRepoHistoryOverlayVisible()) {
+    updateRepoHistoryOverlayLayout();
+  }
 }
 
 function normalizeDroppedPath(inputPath) {
@@ -908,38 +1366,107 @@ function extractDroppedPath(event) {
   const dt = event.dataTransfer;
   if (!dt) return "";
 
-  const uriList = dt.getData("text/uri-list");
-  if (uriList) {
-    const first = uriList
-      .split(/\r?\n/)
-      .map((x) => x.trim())
-      .find((x) => x && !x.startsWith("#"));
-    if (first && first.startsWith("file://")) {
+  const normalizePossiblePath = (rawValue) => {
+    const value = String(rawValue || "").trim();
+    if (!value) {
+      return "";
+    }
+    if (value.startsWith("file://")) {
       try {
-        const url = new URL(first);
+        const url = new URL(value);
         return normalizeDroppedPath(decodeURIComponent(url.pathname));
       } catch {
         return "";
       }
     }
+    return normalizeDroppedPath(value);
+  };
+
+  const firstLine = (rawValue) =>
+    String(rawValue || "")
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .find((x) => x && !x.startsWith("#")) || "";
+
+  const getPathFromFile = (file) => {
+    if (!file) {
+      return "";
+    }
+    if (
+      window.cowhubDesktop &&
+      typeof window.cowhubDesktop.getPathForFile === "function"
+    ) {
+      const electronPath = window.cowhubDesktop.getPathForFile(file);
+      if (typeof electronPath === "string" && electronPath.trim()) {
+        return normalizeDroppedPath(electronPath);
+      }
+    }
+    if (typeof file.path === "string" && file.path.trim()) {
+      return normalizeDroppedPath(file.path);
+    }
+    if (typeof file.name === "string" && file.name.trim()) {
+      return "";
+    }
+    return "";
+  };
+
+  const files = dt.files ? [...dt.files] : [];
+  for (const file of files) {
+    const filePath = getPathFromFile(file);
+    if (filePath) {
+      return filePath;
+    }
   }
 
-  const plain = dt.getData("text/plain").trim();
-  return normalizeDroppedPath(plain);
+  const items = dt.items ? [...dt.items] : [];
+  for (const item of items) {
+    if (!item || item.kind !== "file") {
+      continue;
+    }
+    const file = item.getAsFile();
+    const filePath = getPathFromFile(file);
+    if (filePath) {
+      return filePath;
+    }
+  }
+
+  const uriList = dt.getData("text/uri-list");
+  if (uriList) {
+    const candidate = normalizePossiblePath(firstLine(uriList));
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  const plainText = firstLine(dt.getData("text/plain"));
+  const plainPath = normalizePossiblePath(plainText);
+  if (plainPath) {
+    return plainPath;
+  }
+
+  const downloadUrl = firstLine(dt.getData("DownloadURL"));
+  if (downloadUrl) {
+    const segments = downloadUrl.split(":");
+    const possiblePath = normalizePossiblePath(segments.slice(2).join(":"));
+    if (possiblePath) {
+      return possiblePath;
+    }
+  }
+
+  return "";
 }
 
-function bindDnD() {
-  const zone = el.localDropZone;
-
+function bindDropZone(zone, onDropPath) {
+  if (!zone) {
+    return;
+  }
   zone.addEventListener("dragover", (event) => {
     event.preventDefault();
     zone.classList.add("active");
   });
-
   zone.addEventListener("dragleave", () => {
     zone.classList.remove("active");
   });
-
   zone.addEventListener("drop", (event) => {
     event.preventDefault();
     zone.classList.remove("active");
@@ -948,9 +1475,59 @@ function bindDnD() {
       log("拖拽已忽略：未提取到有效路径");
       return;
     }
-    el.localPathInput.value = dropped;
+    onDropPath(dropped);
+  });
+}
+
+function bindDnD() {
+  const isAbsolutePath = (pathValue) => {
+    if (!pathValue) return false;
+    if (/^[A-Za-z]:\\/.test(pathValue)) return true;
+    if (pathValue.startsWith("/")) return true;
+    if (pathValue.startsWith("\\\\")) return true;
+    return false;
+  };
+  bindDropZone(el.localDropZone, (dropped) => {
+    if (!isAbsolutePath(dropped)) {
+      log(`拖拽路径无效（非绝对路径）：${dropped}。请改用点击输入框选择目录。`);
+      return;
+    }
+    if (el.localPathInput) {
+      el.localPathInput.value = dropped;
+    }
+    localBatchImportContext = null;
+    updateLocalImportButtonState();
     log(`已捕获拖拽路径：${dropped}`);
   });
+  bindDropZone(el.localRepoDropZone, (dropped) => {
+    if (!isAbsolutePath(dropped)) {
+      log(`拖拽路径无效（非绝对路径）：${dropped}。请点击“技能仓库路径”选择目录。`);
+      return;
+    }
+    activateLocalImportTab("repo");
+    if (el.localRepoPathInput) {
+      el.localRepoPathInput.value = dropped;
+    }
+    updateLocalRepoScanButtonState();
+    log(`已捕获技能仓库路径：${dropped}`);
+    submitLocalRepoScanForm();
+  });
+}
+
+function submitLocalRepoScanForm() {
+  if (!el.localRepoScanForm) {
+    return;
+  }
+  const submitBtn = el.localRepoScanForm.querySelector("button[type=submit]");
+  if (submitBtn instanceof HTMLButtonElement && submitBtn.disabled) {
+    return;
+  }
+  log("已自动触发“扫描并选择导入项”");
+  if (typeof el.localRepoScanForm.requestSubmit === "function") {
+    el.localRepoScanForm.requestSubmit(submitBtn instanceof HTMLElement ? submitBtn : undefined);
+    return;
+  }
+  el.localRepoScanForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 }
 
 async function onRepoScanSubmit(event) {
@@ -961,30 +1538,12 @@ async function onRepoScanSubmit(event) {
 
   try {
     const payload = Object.fromEntries(new FormData(form).entries());
+    payload.rulesCanonicalValidation = Boolean(el.repoRulesCanonical && el.repoRulesCanonical.checked);
     const result = await api("/api/repo/scan", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-
-    repoScanState = {
-      repoPath: result.result.repoPath,
-      repoId: result.result.repoId,
-      repoUrl: result.result.repoUrl,
-      ref: result.result.ref || "",
-      multiToolset: Boolean(result.result.multiToolset),
-      candidates: result.result.candidates || [],
-      selectedKeys: new Set((result.result.candidates || []).map((item) => item.key)),
-    };
-
-    const selectedCount = repoScanState.selectedKeys.size;
-    const modeText = repoScanState.multiToolset ? "多端工具集" : "标准模式";
-    el.repoScanMeta.textContent =
-      `仓库：${repoScanState.repoUrl || "(本地路径)"} | ` +
-      `本地目录：${repoScanState.repoPath} | ` +
-      `模式：${modeText} | ` +
-      `候选：${repoScanState.candidates.length} | ` +
-      `已勾选：${selectedCount}`;
-    renderRepoCandidates();
+    applyRepoScanResult(result.result, "GitLab 下载并扫描");
     log(`仓库扫描完成：${repoScanState.candidates.length} 项，默认全选`);
   } catch (error) {
     log(`仓库扫描失败：${getErrorMessage(error)}`);
@@ -995,6 +1554,75 @@ async function onRepoScanSubmit(event) {
       repoUrl: "",
       ref: "",
       multiToolset: false,
+      rulesCanonicalValidation: true,
+      candidates: [],
+      selectedKeys: new Set(),
+    };
+    renderRepoCandidates();
+  } finally {
+    done();
+  }
+}
+
+function applyRepoScanResult(scanResult, sourceLabel = "") {
+  const result = scanResult || {};
+  const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  repoScanState = {
+    repoPath: result.repoPath || "",
+    repoId: result.repoId || "",
+    repoUrl: result.repoUrl || "",
+    ref: result.ref || "",
+    multiToolset: Boolean(result.multiToolset),
+    rulesCanonicalValidation: result.rulesCanonicalValidation !== false,
+    candidates,
+    selectedKeys: new Set(candidates.map((item) => item.key)),
+  };
+
+  const selectedCount = repoScanState.selectedKeys.size;
+  const modeText = repoScanState.multiToolset ? "多端工具集" : "标准模式";
+  const rulesModeText = repoScanState.rulesCanonicalValidation ? "rules范式校验开" : "rules范式校验关";
+  const sourceText = sourceLabel ? `来源：${sourceLabel} | ` : "";
+  el.repoScanMeta.textContent =
+    `${sourceText}仓库：${repoScanState.repoUrl || "(本地路径)"} | ` +
+    `本地目录：${repoScanState.repoPath} | ` +
+    `模式：${modeText}/${rulesModeText} | ` +
+    `候选：${repoScanState.candidates.length} | ` +
+    `已勾选：${selectedCount}`;
+  recordRepoHistoryEntry({
+    repoId: repoScanState.repoId,
+    repoUrl: repoScanState.repoUrl,
+    repoPath: repoScanState.repoPath,
+  });
+  renderRepoCandidates();
+  openRepoHistoryOverlay();
+}
+
+async function onLocalRepoScanSubmit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  const done = setBusy(button, "扫描中...");
+  try {
+    const payload = Object.fromEntries(new FormData(form).entries());
+    payload.repoPath = String(payload.repoPath || "").trim();
+    payload.multiToolset = Boolean(el.localRepoMultiToolset && el.localRepoMultiToolset.checked);
+    payload.rulesCanonicalValidation = Boolean(el.localRepoRulesCanonical && el.localRepoRulesCanonical.checked);
+    const result = await api("/api/repo/scan", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    applyRepoScanResult(result.result, "本地技能仓库扫描");
+    log(`本地技能仓库扫描完成：${repoScanState.candidates.length} 项，默认全选`);
+  } catch (error) {
+    log(`本地技能仓库扫描失败：${getErrorMessage(error)}`);
+    el.repoScanMeta.textContent = `扫描失败：${getErrorMessage(error)}`;
+    repoScanState = {
+      repoPath: "",
+      repoId: "",
+      repoUrl: "",
+      ref: "",
+      multiToolset: false,
+      rulesCanonicalValidation: true,
       candidates: [],
       selectedKeys: new Set(),
     };
@@ -1007,6 +1635,20 @@ async function onRepoScanSubmit(event) {
 function onRepoCandidatesChange(event) {
   const target = event.target;
   if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+  if (target.classList.contains("repo-type-check")) {
+    const type = target.getAttribute("data-type") || "";
+    if (!type) {
+      return;
+    }
+    const keys = repoScanState.candidates.filter((item) => item.type === type).map((item) => item.key);
+    if (target.checked) {
+      keys.forEach((key) => repoScanState.selectedKeys.add(key));
+    } else {
+      keys.forEach((key) => repoScanState.selectedKeys.delete(key));
+    }
+    renderRepoCandidates();
     return;
   }
   if (!target.classList.contains("repo-candidate-check")) {
@@ -1069,6 +1711,38 @@ function onClearRepoDirectory() {
   log("已清空下载目录，将使用默认受管目录");
 }
 
+async function onPickLocalRepoDirectory() {
+  const picker = getDirectoryPicker();
+
+  if (!picker) {
+    log("当前运行环境不支持目录选择器，请使用 Electron 桌面应用");
+    return;
+  }
+
+  try {
+    const selected = await picker();
+    if (!selected) {
+      return;
+    }
+    activateLocalImportTab("repo");
+    if (el.localRepoPathInput) {
+      el.localRepoPathInput.value = selected;
+    }
+    updateLocalRepoScanButtonState();
+    log(`已选择技能仓库目录：${selected}`);
+  } catch (error) {
+    log(`选择技能仓库目录失败：${getErrorMessage(error)}`);
+  }
+}
+
+function onClearLocalRepoDirectory() {
+  if (el.localRepoPathInput) {
+    el.localRepoPathInput.value = "";
+  }
+  updateLocalRepoScanButtonState();
+  log("已清空技能仓库路径");
+}
+
 async function onImportRepoCandidates() {
   if (!repoScanState.repoPath) {
     log("请先执行下载并扫描");
@@ -1089,6 +1763,7 @@ async function onImportRepoCandidates() {
         repoPath: repoScanState.repoPath,
         selectedKeys,
         multiToolset: repoScanState.multiToolset,
+        rulesCanonicalValidation: repoScanState.rulesCanonicalValidation,
       }),
     });
     const imported = result.result.imported || [];
@@ -1097,6 +1772,9 @@ async function onImportRepoCandidates() {
     log(`导入中心仓库完成：新增 ${created}，复用 ${reused}，总计 ${imported.length}`);
     if (result.result.hooksSnapshot) {
       log(`hooks 配置与目录结构已归档：${result.result.hooksSnapshot.snapshotDir}`);
+    }
+    if (result.result.rulesSnapshot) {
+      log(`rules 目录结构已归档：${result.result.rulesSnapshot.snapshotDir}`);
     }
     await refreshOverview("auto");
   } catch (error) {
@@ -1116,12 +1794,16 @@ async function onLocalImport(event) {
     const payloadType = toPluralType(String(payload.type || ""));
     const payloadSourcePath = String(payload.sourcePath || "").trim();
     const isHooksType = payloadType === "hooks";
+    const isRulesType = payloadType === "rules";
     const isBatchByType =
       Boolean(localBatchImportContext) &&
       localBatchImportContext.type === payloadType &&
       localBatchImportContext.sourcePath === payloadSourcePath;
 
-    if (isHooksType || isBatchByType) {
+    if (isHooksType || isRulesType || isBatchByType) {
+      if (isBatchByType && localBatchImportContext && Array.isArray(localBatchImportContext.excludeSourcePaths)) {
+        payload.excludeSourcePaths = localBatchImportContext.excludeSourcePaths;
+      }
       const result = await api("/api/import/local/batch", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -1132,6 +1814,15 @@ async function onLocalImport(event) {
       );
       if (summary.hooksSnapshot) {
         log(`hooks 配置与目录结构已归档：${summary.hooksSnapshot.snapshotDir}`);
+      }
+      if (summary.rulesSnapshot) {
+        log(`rules 目录结构已归档：${summary.rulesSnapshot.snapshotDir}`);
+      }
+      if (summary.rulesCompanionNotice) {
+        log(summary.rulesCompanionNotice);
+      }
+      if (summary.skippedLinked && summary.skippedLinked > 0) {
+        log(`已自动跳过已链接项：${summary.skippedLinked}`);
       }
       localBatchImportContext = null;
     } else {
@@ -1220,6 +1911,14 @@ async function onLinkSubmitSingle() {
       if (result.result.config) {
         log(`hooks 配置文件已链接：${result.result.config.path}`);
       }
+    } else if (result.result && result.result.mode === "rules-batch") {
+      log(
+        `rules 批量链接完成（${scopeLabel}）：尝试 ${result.result.attempted || 0}，新建 ${result.result.linked || 0}，已存在 ${result.result.alreadyLinked || 0}，失败 ${(result.result.failed || []).length}`,
+      );
+      const companionFiles = result.result.companionFiles || [];
+      if (companionFiles.length > 0) {
+        log(`检测到源地址有配置文件和规则文件：${companionFiles.map((item) => item.name).join(", ")}，将跟随rules一起链接`);
+      }
     } else {
       log(`链接成功（${scopeLabel}）：${result.result.mapping.linkPath}`);
     }
@@ -1238,7 +1937,7 @@ async function onLinkAllRun() {
   }
   const selectedTypes = getSelectedLinkTypes();
   if (selectedTypes.length === 0) {
-    log("请至少选择一个类型（skills/commands/hooks/agents）");
+    log("请至少选择一个类型（skills/commands/hooks/rules/agents）");
     return;
   }
 
@@ -1252,28 +1951,39 @@ async function onLinkAllRun() {
   const done = setBusy(el.linkCreateBtn, "批量链接中...");
   try {
     const includesHooks = selectedTypes.includes("hooks");
+    const includesRules = selectedTypes.includes("rules");
+    const getSourcePathByType = (typeValue) => {
+      if (localBatchImportContext && localBatchImportContext.type === typeValue) {
+        return localBatchImportContext.sourcePath;
+      }
+      if (!(currentOverview && el.resourceSelect)) {
+        return "";
+      }
+      const resource = (currentOverview.state.resources || []).find(
+        (item) => item.id === el.resourceSelect.value && item.type === typeValue,
+      );
+      return resource ? resource.sourcePath : "";
+    };
     const payload = {
       toolId,
       types: selectedTypes,
     };
     if (includesHooks) {
-      let hooksSourcePath = "";
-      if (localBatchImportContext && localBatchImportContext.type === "hooks") {
-        hooksSourcePath = localBatchImportContext.sourcePath;
-      } else if (currentOverview && el.resourceSelect) {
-        const resource = (currentOverview.state.resources || []).find(
-          (item) => item.id === el.resourceSelect.value && item.type === "hooks",
-        );
-        if (resource) {
-          hooksSourcePath = resource.sourcePath;
-        }
-      }
+      const hooksSourcePath = getSourcePathByType("hooks");
 
       if (!hooksSourcePath) {
         log("批量链接 hooks 需要来源 hooks 目录。请先在浏览器中选择一个 hooks 条目或使用类型箭头填充。");
         return;
       }
       payload.hooksSourcePath = hooksSourcePath;
+    }
+    if (includesRules) {
+      const rulesSourcePath = getSourcePathByType("rules");
+      if (!rulesSourcePath) {
+        log("批量链接 rules 需要来源 rules 目录。请先在浏览器中选择一个 rules 条目或使用类型箭头填充。");
+        return;
+      }
+      payload.rulesSourcePath = rulesSourcePath;
     }
     if (currentLinkScopePath) {
       payload.projectPath = currentLinkScopePath;
@@ -1294,6 +2004,11 @@ async function onLinkAllRun() {
     }
     if (summary.hooksConfig) {
       log(`hooks 配置文件已链接：${summary.hooksConfig.path}`);
+    }
+    if (summary.rulesCompanionNotice) {
+      log(summary.rulesCompanionNotice);
+    } else if (summary.rulesCompanions && summary.rulesCompanions.length > 0) {
+      log(`检测到源地址有配置文件和规则文件：${summary.rulesCompanions.map((item) => item.name).join(", ")}，将跟随rules一起链接`);
     }
     await refreshOverview("auto");
   } catch (error) {
@@ -1411,6 +2126,12 @@ async function onPathUnset() {
 }
 
 async function onRollback() {
+  if (rollbackBusy) {
+    log("回滚进行中，请稍候");
+    return;
+  }
+  const done = setBusy(el.rollbackBtn, "回滚中...");
+  rollbackBusy = true;
   try {
     const result = await api("/api/rollback", {
       method: "POST",
@@ -1420,6 +2141,38 @@ async function onRollback() {
     await refreshOverview("auto");
   } catch (error) {
     log(`回滚失败：${getErrorMessage(error)}`);
+  } finally {
+    rollbackBusy = false;
+    done();
+  }
+}
+
+async function onRollbackByOperation(operationId, linkPath) {
+  if (!operationId) {
+    return;
+  }
+  if (rollbackBusy) {
+    log("回滚进行中，请稍候");
+    return;
+  }
+  const ok = window.confirm(`是否回滚该次链接？\n${linkPath}`);
+  if (!ok) {
+    return;
+  }
+  const done = setBusy(el.rollbackBtn, "回滚中...");
+  rollbackBusy = true;
+  try {
+    const result = await api("/api/rollback", {
+      method: "POST",
+      body: JSON.stringify({ operationId }),
+    });
+    log(`按记录回滚成功：${result.result.rolledBackOperationId}`);
+    await refreshOverview("auto");
+  } catch (error) {
+    log(`按记录回滚失败：${getErrorMessage(error)}`);
+  } finally {
+    rollbackBusy = false;
+    done();
   }
 }
 
@@ -1438,6 +2191,25 @@ function bindEvents() {
     el.repoScanForm.addEventListener("input", updateRepoScanButtonState);
     el.repoScanForm.addEventListener("change", updateRepoScanButtonState);
   }
+  if (el.repoHistoryBadge) {
+    el.repoHistoryBadge.addEventListener("click", toggleRepoHistoryOverlay);
+  }
+  if (el.repoHistoryCloseBtn) {
+    el.repoHistoryCloseBtn.addEventListener("click", closeRepoHistoryOverlay);
+  }
+  if (el.repoHistoryBackdrop) {
+    el.repoHistoryBackdrop.addEventListener("click", closeRepoHistoryOverlay);
+  }
+  window.addEventListener("resize", () => {
+    if (isRepoHistoryOverlayVisible()) {
+      updateRepoHistoryOverlayLayout();
+    }
+  });
+  window.addEventListener("scroll", () => {
+    if (isRepoHistoryOverlayVisible()) {
+      updateRepoHistoryOverlayLayout();
+    }
+  }, { passive: true });
   if (el.repoCandidates) {
     el.repoCandidates.addEventListener("change", onRepoCandidatesChange);
   }
@@ -1462,6 +2234,16 @@ function bindEvents() {
   }
   if (el.repoTargetPath) {
     el.repoTargetPath.addEventListener("click", onPickRepoDirectory);
+  }
+  if (el.localRepoPathInput) {
+    el.localRepoPathInput.addEventListener("click", onPickLocalRepoDirectory);
+  }
+  if (el.localRepoClearDirBtn) {
+    el.localRepoClearDirBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onClearLocalRepoDirectory();
+    });
   }
   if (el.toolScopePath) {
     el.toolScopePath.addEventListener("click", onPickBrowserScopeDirectory);
@@ -1534,19 +2316,40 @@ function bindEvents() {
       renderConflictModule();
     });
   }
-  el.localImportForm.addEventListener("submit", onLocalImport);
-  el.localImportForm.addEventListener("input", updateLocalImportButtonState);
-  el.localImportForm.addEventListener("change", updateLocalImportButtonState);
-  const localTypeSelect = el.localImportForm.querySelector('select[name="type"]');
-  if (localTypeSelect) {
-    localTypeSelect.addEventListener("change", () => {
-      localBatchImportContext = null;
+  if (el.localImportTabs) {
+    el.localImportTabs.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const tabBtn = target.closest("[data-tab]");
+      if (!tabBtn) {
+        return;
+      }
+      const tab = tabBtn.getAttribute("data-tab") || "single";
+      activateLocalImportTab(tab);
     });
+  }
+  if (el.localImportForm) {
+    el.localImportForm.addEventListener("submit", onLocalImport);
+    el.localImportForm.addEventListener("input", updateLocalImportButtonState);
+    el.localImportForm.addEventListener("change", updateLocalImportButtonState);
+    const localTypeSelect = el.localImportForm.querySelector('select[name="type"]');
+    if (localTypeSelect) {
+      localTypeSelect.addEventListener("change", () => {
+        localBatchImportContext = null;
+      });
+    }
   }
   if (el.localPathInput) {
     el.localPathInput.addEventListener("input", () => {
       localBatchImportContext = null;
     });
+  }
+  if (el.localRepoScanForm) {
+    el.localRepoScanForm.addEventListener("submit", onLocalRepoScanSubmit);
+    el.localRepoScanForm.addEventListener("input", updateLocalRepoScanButtonState);
+    el.localRepoScanForm.addEventListener("change", updateLocalRepoScanButtonState);
   }
   el.gitForm.addEventListener("submit", onGitImport);
   el.gitForm.addEventListener("input", updateGitImportButtonsState);
@@ -1555,6 +2358,14 @@ function bindEvents() {
   el.linkForm.addEventListener("submit", onLinkCreate);
   el.linkForm.addEventListener("input", updateLinkCreateButtonState);
   el.linkForm.addEventListener("change", updateLinkCreateButtonState);
+  const linkToolSelect = el.linkForm ? el.linkForm.querySelector('select[name="toolId"]') : null;
+  if (linkToolSelect instanceof HTMLSelectElement) {
+    linkToolSelect.addEventListener("change", () => {
+      if (currentOverview && currentOverview.state) {
+        renderResourceOptions(currentOverview.state.resources || []);
+      }
+    });
+  }
   if (el.linkAllModeToggle) {
     el.linkAllModeToggle.addEventListener("change", syncLinkModeUI);
   }
@@ -1563,6 +2374,21 @@ function bindEvents() {
   el.pathSetForm.addEventListener("change", updatePathSetButtonsState);
   el.pathUnsetBtn.addEventListener("click", onPathUnset);
   el.rollbackBtn.addEventListener("click", onRollback);
+  if (el.operationRecords) {
+    el.operationRecords.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const item = target.closest(".operation-item.rollbackable");
+      if (!item || !el.operationRecords.contains(item)) {
+        return;
+      }
+      const operationId = item.getAttribute("data-operation-id") || "";
+      const linkPath = item.getAttribute("data-link-path") || "";
+      onRollbackByOperation(operationId, linkPath);
+    });
+  }
   el.toolBrowserSelect.addEventListener("change", () => {
     renderToolBrowser();
   });
@@ -1591,11 +2417,14 @@ function bindEvents() {
       const typeValue = typeDirBtn.getAttribute("data-type") || "";
       const toolId = typeDirBtn.getAttribute("data-tool-id") || "";
       const dirPath = typeDirBtn.getAttribute("data-type-dir-path") || "";
-      if (!typeValue || !dirPath) {
+      const typePickKey = typeDirBtn.getAttribute("data-type-pick-key") || "";
+      const pickContext = toolBrowserTypePickMap.get(typePickKey);
+      if (!typeValue || !dirPath || !pickContext) {
         log("选择失败：当前类型目录不可用，请刷新后重试");
         return;
       }
 
+      activateLocalImportTab("single");
       const form = el.localImportForm;
       const typeSelect = form.querySelector('select[name="type"]');
       const sourceInput = form.querySelector('input[name="sourcePath"]');
@@ -1614,6 +2443,7 @@ function bindEvents() {
       localBatchImportContext = {
         type: toPluralType(typeValue),
         sourcePath: dirPath,
+        excludeSourcePaths: Array.isArray(pickContext.excludeSourcePaths) ? pickContext.excludeSourcePaths : [],
       };
       setLinkAllTypeSelection(typeValue, toolId);
       log(`已填充本地导入目录：${typeValue} / ${dirPath}（将按该类型批量导入并可批量链接）`);
@@ -1632,6 +2462,7 @@ function bindEvents() {
       return;
     }
 
+    activateLocalImportTab("single");
     const form = el.localImportForm;
     const typeSelect = form.querySelector('select[name="type"]');
     const sourceInput = form.querySelector('input[name="sourcePath"]');
@@ -1656,6 +2487,9 @@ function bindEvents() {
 }
 
 async function boot() {
+  repoHistoryEntries = loadRepoHistoryEntries();
+  renderRepoHistoryCount();
+  activateLocalImportTab("single");
   bindEvents();
   if (el.conflictTypeFilter) {
     el.conflictTypeFilter.value = selectedConflictType;

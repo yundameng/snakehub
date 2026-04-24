@@ -15,6 +15,26 @@ export interface ToolScanResult {
   assets: ScanAsset[];
 }
 
+const RULE_SUFFIX_BY_TOOL: Record<string, string> = {
+  claude: ".md",
+  cursor: ".mdc",
+  codex: ".rules",
+};
+
+function shouldIncludeScannedEntry(toolId: string, type: ResourceType, entry: { name: string; isFile(): boolean }): boolean {
+  if (type !== "rules") {
+    return true;
+  }
+  if (!entry.isFile()) {
+    return false;
+  }
+  const expected = RULE_SUFFIX_BY_TOOL[toolId];
+  if (!expected) {
+    return false;
+  }
+  return entry.name.toLowerCase().endsWith(expected);
+}
+
 async function scanTargetDir(
   toolId: string,
   type: ResourceType,
@@ -30,6 +50,9 @@ async function scanTargetDir(
 
   for (const entry of entries) {
     if (entry.name.startsWith(".")) {
+      continue;
+    }
+    if (!shouldIncludeScannedEntry(toolId, type, entry)) {
       continue;
     }
 

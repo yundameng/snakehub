@@ -33,7 +33,7 @@
         <h2>首次向导</h2>
         <ol>
           <li><strong>扫描：</strong>检测已安装 AI 工具和现有资源。</li>
-          <li><strong>导入：</strong>创建或导入第一个 skill / hook / agent / command。</li>
+          <li><strong>导入：</strong>创建或导入第一个 skill / hook / rule / agent / command。</li>
           <li><strong>链接：</strong>把资源映射到目标工具目录并验证。</li>
         </ol>
         <p id="wizardHint"></p>
@@ -69,6 +69,7 @@
               <select id="toolBrowserTypeSelect">
                 <option value="skills" selected>skills</option>
                 <option value="hooks">hooks</option>
+                <option value="rules">rules</option>
                 <option value="agents">agents</option>
                 <option value="commands">commands</option>
               </select>
@@ -79,9 +80,15 @@
         <div id="toolBrowserContent" class="tool-browser-grid"></div>
       </section>
 
-      <section class="panel">
-        <h2>GitLab 下载并导入中心仓库</h2>
+      <section id="repoPanel" class="panel repo-panel">
+        <div class="panel-head">
+          <h2>GitLab 下载并导入中心仓库（内部）</h2>
+          <button id="repoHistoryBadge" class="repo-history-badge" type="button">
+            扫描项目：<span id="repoHistoryCount">0</span>
+          </button>
+        </div>
         <form id="repoScanForm" class="stack">
+          <label class="inline"><input id="repoRulesCanonical" name="rulesCanonicalValidation" type="checkbox" checked /> rules范式校验(有rules且需要链接至多工具平台时建议开启)</label>
           <label class="inline"><input id="repoMultiToolset" name="multiToolset" type="checkbox" checked /> 多端工具集</label>
           <label>GitLab 地址（或本地 git 仓库路径）
             <input name="repoUrl" placeholder="https://gitlab.com/group/repo.git" required />
@@ -101,35 +108,52 @@
           <button class="btn btn-strong" type="submit">下载并扫描</button>
         </form>
 
-        <div id="repoScanMeta" class="tool-meta"></div>
-        <div class="row">
-          <button class="btn" id="repoSelectAllBtn" type="button">全选全部</button>
-          <button class="btn" id="repoClearBtn" type="button">清空选择</button>
-          <button class="btn btn-strong" id="repoImportBtn" type="button">导入中心仓库</button>
+      </section>
+
+      <section id="localImportPanel" class="panel">
+        <div class="panel-head panel-head-wrap">
+          <h2>从本地路径导入</h2>
+          <div id="localImportTabs" class="import-tabs" role="tablist" aria-label="本地导入模式">
+            <button id="localSingleTabBtn" class="tool-tab active" type="button" role="tab" aria-selected="true" data-tab="single">单技能导入</button>
+            <button id="localRepoTabBtn" class="tool-tab" type="button" role="tab" aria-selected="false" data-tab="repo">技能仓库导入</button>
+          </div>
         </div>
-        <div id="repoCandidates" class="repo-candidates"></div>
+        <div id="localSingleImportPane" class="local-import-pane active" role="tabpanel" aria-labelledby="localSingleTabBtn">
+          <form id="localImportForm" class="stack">
+            <label>类型
+              <select name="type">
+                <option value="skill">skill</option>
+                <option value="hook">hook</option>
+                <option value="agent">agent</option>
+                <option value="command">command</option>
+                <option value="rule">rule</option>
+              </select>
+            </label>
+            <label>路径 <input id="localPathInput" name="sourcePath" placeholder="~/Downloads/skill-folder" required /></label>
+            <label>名称（可选） <input name="name" placeholder="留空则自动推断" /></label>
+            <button class="btn btn-strong" type="submit">导入本地资源</button>
+          </form>
+          <div id="localDropZone" class="drop-zone">可将系统中文件夹路径拖拽到这里（会自动填入路径）</div>
+        </div>
+        <div id="localRepoImportPane" class="local-import-pane" role="tabpanel" aria-labelledby="localRepoTabBtn" hidden>
+          <form id="localRepoScanForm" class="stack">
+            <label class="inline"><input id="localRepoRulesCanonical" name="rulesCanonicalValidation" type="checkbox" checked /> rules范式校验(有rules且需要链接至多工具平台时建议开启)</label>
+            <label class="inline"><input id="localRepoMultiToolset" name="multiToolset" type="checkbox" checked /> 多端工具集</label>
+            <label>技能仓库路径
+              <span class="path-picker">
+                <input id="localRepoPathInput" name="repoPath" placeholder="点击选择技能仓库目录" readonly required />
+                <button class="path-clear-btn" id="localRepoClearDirBtn" type="button" aria-label="清空技能仓库路径">✕</button>
+              </span>
+            </label>
+            <div class="hint-line">目录结构需包含可扫描资源（如 skills / commands / hooks / rules / agents）。</div>
+            <button class="btn btn-strong" type="submit">扫描并选择导入项</button>
+          </form>
+          <div id="localRepoDropZone" class="drop-zone">可将技能仓库目录拖拽到这里（会自动填入路径）</div>
+        </div>
       </section>
 
       <section class="panel">
-        <h2>从本地路径导入</h2>
-        <form id="localImportForm" class="stack">
-          <label>类型
-            <select name="type">
-              <option value="skill">skill</option>
-              <option value="hook">hook</option>
-              <option value="agent">agent</option>
-              <option value="command">command</option>
-            </select>
-          </label>
-          <label>路径 <input id="localPathInput" name="sourcePath" placeholder="~/Downloads/skill-folder" required /></label>
-          <label>名称（可选） <input name="name" placeholder="留空则自动推断" /></label>
-          <button class="btn btn-strong" type="submit">导入本地资源</button>
-        </form>
-        <div id="localDropZone" class="drop-zone">可将系统中文件夹路径拖拽到这里（会自动填入路径）</div>
-      </section>
-
-      <section class="panel">
-        <h2>从 Git 仓库导入</h2>
+        <h2>从 GitHub 仓库导入（外部）</h2>
         <form id="gitForm" class="stack">
           <label>类型
             <select name="type">
@@ -137,6 +161,7 @@
               <option value="hook">hook</option>
               <option value="agent">agent</option>
               <option value="command">command</option>
+              <option value="rule">rule</option>
             </select>
           </label>
           <label>仓库地址/路径 <input name="repoUrl" placeholder="https://github.com/org/repo 或 /local/repo" required /></label>
@@ -173,6 +198,7 @@
             <label class="inline"><input type="checkbox" name="linkTypes" value="skills" checked /> skills</label>
             <label class="inline"><input type="checkbox" name="linkTypes" value="commands" checked /> commands</label>
             <label class="inline"><input type="checkbox" name="linkTypes" value="hooks" checked /> hooks</label>
+            <label class="inline"><input type="checkbox" name="linkTypes" value="rules" checked /> rules</label>
             <label class="inline"><input type="checkbox" name="linkTypes" value="agents" checked /> agents</label>
           </div>
           <label>工具
@@ -204,6 +230,7 @@
               <option value="hook">hook</option>
               <option value="agent">agent</option>
               <option value="command">command</option>
+              <option value="rule">rule</option>
             </select>
           </label>
           <label>目标路径 <input name="targetPath" placeholder="~/.codex/hooks" required /></label>
@@ -225,6 +252,7 @@
               <option value="all">全部</option>
               <option value="skills">skills</option>
               <option value="hooks">hooks</option>
+              <option value="rules">rules</option>
               <option value="agents">agents</option>
               <option value="commands">commands</option>
             </select>
@@ -243,9 +271,27 @@
           <h2>操作日志</h2>
           <button id="rollbackBtn" class="btn">回滚最近一次链接</button>
         </div>
+        <div class="hint-line">点击下方“链接”记录可按该次操作回滚。</div>
+        <div id="operationRecords" class="operation-list"></div>
+        <div class="hint-line">页面日志（仅当前会话可见）：</div>
         <pre id="eventLog" class="log-box"></pre>
       </section>
     </main>
+
+    <div id="repoHistoryBackdrop" class="repo-history-backdrop" aria-hidden="true"></div>
+    <div id="repoHistoryOverlay" class="repo-history-overlay" aria-hidden="true">
+      <div class="repo-history-overlay-head">
+        <strong>项目扫描结果与候选</strong>
+        <button id="repoHistoryCloseBtn" class="btn" type="button">收起</button>
+      </div>
+      <div id="repoScanMeta" class="tool-meta"></div>
+      <div class="row repo-history-actions">
+        <button class="btn" id="repoSelectAllBtn" type="button">全选全部</button>
+        <button class="btn" id="repoClearBtn" type="button">清空选择</button>
+        <button class="btn btn-strong" id="repoImportBtn" type="button">导入中心仓库</button>
+      </div>
+      <div id="repoCandidates" class="repo-candidates"></div>
+    </div>
 
     <script src="/app.js"></script>
   </body>

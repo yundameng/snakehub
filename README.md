@@ -1,6 +1,6 @@
-# cowhub
+# snakehub
 
-`cowhub` 是一个本地中心仓库工具，把 `skills/hooks/agents/commands` 托管到 `~/.cowhub`，并通过链接同步到不同 AI 工具目录，实现一处维护、全局复用。
+`snakehub` 是一个本地中心仓库工具，把 `skills/hooks/rules/agents/commands` 托管到 `~/.snakehub`，并通过链接同步到不同 AI 工具目录，实现一处维护、全局复用。
 
 ## 已实现能力
 
@@ -25,10 +25,11 @@
 ## 目录结构
 
 ```text
-~/.cowhub/
+~/.snakehub/
   store/
     skills/
     hooks/
+    rules/
     agents/
     commands/
   db/
@@ -43,33 +44,59 @@
 
 ```bash
 # 初始化
-cowhub init
+snakehub init
 
 # 指纹
-cowhub fingerprint <path>
+snakehub fingerprint <path>
 
 # 导入
-cowhub import --type skill --from /path/to/skill --name my-skill
-cowhub import --type command --from /path/to/command --name my-command
+snakehub import --type skill --from /path/to/skill --name my-skill
+snakehub import --type rule --from /path/to/rules --name my-rules
+snakehub import --type command --from /path/to/command --name my-command
 
 # Git 导入
-cowhub import-git --type skill --repo https://github.com/org/repo --list
-cowhub import-git --type skill --repo https://github.com/org/repo --select skills/writing
-cowhub import-git --type skill --repo https://github.com/org/repo --all
+snakehub import-git --type skill --repo https://github.com/org/repo --list
+snakehub import-git --type skill --repo https://github.com/org/repo --select skills/writing
+snakehub import-git --type skill --repo https://github.com/org/repo --all
 
 # 查看
-cowhub list
-cowhub scan
+snakehub list
+snakehub scan
 
 # 路径规则
-cowhub paths
-cowhub paths set --tool codex --type hook --path ~/.codex/hooks
-cowhub paths set --tool codex --type command --path ~/.codex/commands
-cowhub paths unset --tool codex --type hook
+snakehub paths
+snakehub paths set --tool codex --type hook --path ~/.codex/hooks
+snakehub paths set --tool codex --type rule --path ~/.codex/rules
+snakehub paths set --tool codex --type command --path ~/.codex/commands
+snakehub paths unset --tool codex --type hook
 
 # 链接与回滚
-cowhub link --resource <resource_id_or_name> --tool codex --as my-skill
-cowhub rollback
+snakehub link --resource <resource_id_or_name> --tool codex --as my-skill
+snakehub rollback
+```
+
+## 作为命令行工具分享
+
+```bash
+# 1) 本地先验证
+npm run build
+node dist/index.js help
+
+# 2) 预览将发布到 npm 的内容（会自动执行 prepack）
+npm pack --dry-run
+
+# 3) 发布到 npm（首次需要 npm login）
+npm publish
+```
+
+发布后团队可直接使用：
+
+```bash
+# 全局安装
+npm i -g snakehub
+
+# 或免安装直接执行
+npx snakehub help
 ```
 
 ## 桌面运行
@@ -88,6 +115,10 @@ npm run desktop:web
 ```
 
 网页模式默认会启动在 `http://127.0.0.1:4987` 并尝试自动打开浏览器。
+
+说明：
+- Web 模式下，所有 git/SSH/文件操作都发生在运行 `desktop:web` 的那台机器上（服务端环境），不是访问网页的客户端机器环境。
+- 如需局域网访问，可显式指定 `COWHUB_DESKTOP_HOST=0.0.0.0`。
 
 - 页面入口：`desktop-ui/index.html`
 - 桌面服务：`src/desktop/server.ts`
@@ -159,7 +190,7 @@ npm run dist:mac:dmg
 - Cursor: `~/.cursor/{skills,hooks,agents,commands}`
 - Codex:
   - 默认启用 `~/.codex/{skills,commands}`
-  - `hooks/agents` 默认禁用，可通过 `cowhub paths set` 或可视化页面开启
+  - `hooks/agents` 默认禁用，可通过 `snakehub paths set` 或可视化页面开启
 
 ## 开发
 

@@ -14,6 +14,12 @@ import { linkResource, resolveResourceOrThrow } from "../core/linker";
 import { listState } from "../core/list";
 import { importRepoCandidatesToHub, scanRepoCandidates } from "../core/repo-sync";
 import { normalizeResourceType } from "../core/resource-utils";
+import {
+  archiveRulesWithCompanions,
+  detectRulesCompanionsForImport,
+  detectRulesCompanionsForLink,
+  rulesRootFromSourcePath,
+} from "../core/rules-config";
 import { rollbackLinkOperation } from "../core/rollback";
 import { scanTools } from "../core/scanner";
 import { getEffectiveToolPathEntries, resolveTargetDir, setToolPathOverride, unsetToolPathOverride } from "../core/tool-paths";
@@ -21,7 +27,7 @@ import { ResourceType } from "../core/types";
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.COWHUB_DESKTOP_PORT || "4987");
-const HOST = process.env.COWHUB_DESKTOP_HOST || "0.0.0.0";
+const HOST = process.env.COWHUB_DESKTOP_HOST || "127.0.0.1";
 const NO_BROWSER = process.env.COWHUB_DESKTOP_NO_BROWSER === "1";
 
 function resolveWebRoot(): string {
@@ -85,6 +91,8 @@ interface LocalBatchCandidate {
   name: string;
 }
 
+const RULE_FILE_SUFFIXES = new Set([".md", ".mdc", ".rules"]);
+
 async function collectLocalBatchCandidates(type: ResourceType, sourceDir: string): Promise<LocalBatchCandidate[]> {
   const stat = await fs.stat(sourceDir);
   if (!stat.isDirectory()) {
@@ -111,6 +119,21 @@ async function collectLocalBatchCandidates(type: ResourceType, sourceDir: string
       candidates.push({
         sourcePath: skillPath,
         name: entry.name,
+      });
+    }
+  } else if (type === "rules") {
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || !entry.isFile()) {
+        continue;
+      }
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!RULE_FILE_SUFFIXES.has(ext)) {
+        continue;
+      }
+      const entryPath = path.join(sourceDir, entry.name);
+      candidates.push({
+        sourcePath: entryPath,
+        name: path.parse(entry.name).name || entry.name,
       });
     }
   } else {
@@ -149,6 +172,36 @@ function resolveLinkedTarget(linkPath: string, rawTarget: string): string {
   return path.resolve(path.dirname(linkPath), rawTarget);
 }
 
+async function linkCompanionFile(input: {
+  sourcePath: string;
+  targetPath: string;
+  root?: string;
+}): Promise<{ path: string; backupPath?: string; alreadyLinked: boolean }> {
+  const root = input.root ?? getHubRoot();
+  await fs.mkdir(path.dirname(input.targetPath), { recursive: true });
+
+  let backupPath: string | undefined;
+  const exists = await fs
+    .lstat(input.targetPath)
+    .then(() => true)
+    .catch(() => false);
+  if (exists) {
+    const stat = await fs.lstat(input.targetPath);
+    if (stat.isSymbolicLink()) {
+      const rawTarget = await fs.readlink(input.targetPath);
+      const resolvedTarget = resolveLinkedTarget(input.targetPath, rawTarget);
+      if (resolvedTarget === path.resolve(input.sourcePath)) {
+        return { path: input.targetPath, alreadyLinked: true };
+      }
+    }
+    backupPath = path.join(hubPaths(root).backups, `cfg_${Date.now()}_${path.basename(input.targetPath)}`);
+    await fs.rename(input.targetPath, backupPath);
+  }
+
+  await fs.symlink(path.resolve(input.sourcePath), input.targetPath, process.platform === "win32" ? "file" : undefined);
+  return { path: input.targetPath, backupPath, alreadyLinked: false };
+}
+
 async function linkHooksConfigFile(input: {
   toolId: string;
   projectPath?: string;
@@ -173,28 +226,12 @@ async function linkHooksConfigFile(input: {
     throw new Error(`Tool '${input.toolId}' has no hooks target directory.`);
   }
   const configPath = path.join(path.dirname(resolvedHookTarget.path), expectedConfigName);
-  await fs.mkdir(path.dirname(configPath), { recursive: true });
-
-  let backupPath: string | undefined;
-  const exists = await fs
-    .lstat(configPath)
-    .then(() => true)
-    .catch(() => false);
-  if (exists) {
-    const stat = await fs.lstat(configPath);
-    if (stat.isSymbolicLink()) {
-      const rawTarget = await fs.readlink(configPath);
-      const resolvedTarget = resolveLinkedTarget(configPath, rawTarget);
-      if (resolvedTarget === path.resolve(sourceConfigPath)) {
-        return { configPath, alreadyLinked: true };
-      }
-    }
-    backupPath = path.join(hubPaths(root).backups, `cfg_${Date.now()}_${path.basename(configPath)}`);
-    await fs.rename(configPath, backupPath);
-  }
-
-  await fs.symlink(path.resolve(sourceConfigPath), configPath, process.platform === "win32" ? "file" : undefined);
-  return { configPath, backupPath, alreadyLinked: false };
+  const linked = await linkCompanionFile({
+    sourcePath: sourceConfigPath,
+    targetPath: configPath,
+    root,
+  });
+  return { configPath, backupPath: linked.backupPath, alreadyLinked: linked.alreadyLinked };
 }
 
 async function linkHooksGroup(input: {
@@ -272,6 +309,127 @@ async function linkHooksGroup(input: {
       backupPath: config.backupPath,
       alreadyLinked: config.alreadyLinked,
     },
+  };
+}
+
+interface RulesCompanionLinkResult {
+  path: string;
+  name: string;
+  backupPath?: string;
+  alreadyLinked: boolean;
+}
+
+async function linkRulesCompanionFiles(input: {
+  toolId: string;
+  projectPath?: string;
+  rulesSourceRoot: string;
+  root?: string;
+}): Promise<RulesCompanionLinkResult[]> {
+  const root = input.root ?? getHubRoot();
+  const sourceDetection = await detectRulesCompanionsForLink({
+    toolId: input.toolId,
+    projectPath: input.projectPath,
+    rulesDir: input.rulesSourceRoot,
+  });
+  if (sourceDetection.companionPaths.length === 0) {
+    return [];
+  }
+
+  const resolvedRuleTarget = await resolveTargetDir(input.toolId, "rules", root, input.projectPath);
+  if (!resolvedRuleTarget.path) {
+    throw new Error(`Tool '${input.toolId}' has no rules target directory.`);
+  }
+
+  const targetBase = path.dirname(resolvedRuleTarget.path);
+  const linked: RulesCompanionLinkResult[] = [];
+  for (const sourcePath of sourceDetection.companionPaths) {
+    const fileName = path.basename(sourcePath);
+    const linkedResult = await linkCompanionFile({
+      sourcePath,
+      targetPath: path.join(targetBase, fileName),
+      root,
+    });
+    linked.push({
+      path: linkedResult.path,
+      name: fileName,
+      backupPath: linkedResult.backupPath,
+      alreadyLinked: linkedResult.alreadyLinked,
+    });
+  }
+  return linked;
+}
+
+async function linkRulesGroup(input: {
+  resourceToken: string;
+  toolId: string;
+  projectPath?: string;
+  root?: string;
+}): Promise<{
+  mode: "rules-batch";
+  rulesSourceRoot: string;
+  attempted: number;
+  linked: number;
+  alreadyLinked: number;
+  failed: Array<{ resourceId: string; name: string; error: string }>;
+  companionFiles: RulesCompanionLinkResult[];
+}> {
+  const root = input.root ?? getHubRoot();
+  const state = await listState();
+  const selected = resolveResourceOrThrow(state, input.resourceToken);
+  if (selected.type !== "rules") {
+    throw new Error("Selected resource is not a rules resource.");
+  }
+
+  const rulesSourceRoot = rulesRootFromSourcePath(selected.sourcePath);
+  const candidates = state.resources
+    .filter((resource) => resource.type === "rules" && rulesRootFromSourcePath(resource.sourcePath) === rulesSourceRoot)
+    .sort((a, b) => `${a.name}/${a.id}`.localeCompare(`${b.name}/${b.id}`));
+
+  if (candidates.length === 0) {
+    throw new Error(`No rules resources found from source '${rulesSourceRoot}'.`);
+  }
+
+  const companionFiles = await linkRulesCompanionFiles({
+    toolId: input.toolId,
+    projectPath: input.projectPath,
+    rulesSourceRoot,
+    root,
+  });
+
+  let linked = 0;
+  let alreadyLinked = 0;
+  const failed: Array<{ resourceId: string; name: string; error: string }> = [];
+  for (const resource of candidates) {
+    try {
+      const result = await linkResource({
+        resourceToken: resource.id,
+        toolId: input.toolId,
+        projectPath: input.projectPath,
+        root,
+      });
+      if (result.alreadyLinked) {
+        alreadyLinked += 1;
+      } else {
+        linked += 1;
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      failed.push({
+        resourceId: resource.id,
+        name: resource.name,
+        error: message,
+      });
+    }
+  }
+
+  return {
+    mode: "rules-batch",
+    rulesSourceRoot,
+    attempted: candidates.length,
+    linked,
+    alreadyLinked,
+    failed,
+    companionFiles,
   };
 }
 
@@ -409,6 +567,11 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         "Hooks can only be imported as a full set. Use bulk hooks import with the hooks directory (including sibling hooks.json/settings.json).",
       );
     }
+    if (type === "rules") {
+      throw new Error(
+        "Rules can only be imported as a full set. Use bulk rules import with the rules directory.",
+      );
+    }
 
     const result = await importResource({ type, sourcePath, name });
     jsonResponse(res, 200, { ok: true, result });
@@ -419,7 +582,19 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const body = await readJsonBody(req);
     const type = normalizeResourceType(String(body.type ?? ""));
     const sourcePath = normalizeLocalPath(String(body.sourcePath ?? ""));
-    const candidates = await collectLocalBatchCandidates(type, sourcePath);
+    const rawExcludeSourcePaths = Array.isArray(body.excludeSourcePaths)
+      ? body.excludeSourcePaths.map((item) => String(item))
+      : [];
+    const excludeSourcePaths = new Set(
+      rawExcludeSourcePaths
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => normalizeLocalPath(item)),
+    );
+
+    const allCandidates = await collectLocalBatchCandidates(type, sourcePath);
+    const candidates = allCandidates.filter((candidate) => !excludeSourcePaths.has(path.resolve(candidate.sourcePath)));
+    const skippedLinked = allCandidates.length - candidates.length;
     if (candidates.length === 0) {
       throw new Error(`No ${type} candidates found under: ${sourcePath}`);
     }
@@ -430,6 +605,13 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
           configFileName: string;
         }
       | undefined;
+    let rulesSnapshot:
+      | {
+          snapshotDir: string;
+          companionFiles: string[];
+        }
+      | undefined;
+    let rulesCompanionNotice: string | undefined;
     if (type === "hooks") {
       if (path.basename(sourcePath) !== "hooks") {
         throw new Error("Hooks bulk import expects a hooks directory path (e.g. .../.cursor/hooks).");
@@ -439,6 +621,20 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         hooksDir: resolved.hooksDir,
         configPath: resolved.configPath,
       });
+    }
+    if (type === "rules") {
+      if (path.basename(sourcePath) !== "rules") {
+        throw new Error("Rules bulk import expects a rules directory path (e.g. .../.cursor/rules).");
+      }
+      const companions = await detectRulesCompanionsForImport(sourcePath);
+      rulesSnapshot = await archiveRulesWithCompanions({
+        rulesDir: companions.rulesDir,
+        companionPaths: companions.companionPaths,
+      });
+      if (companions.companionFiles.length > 0) {
+        rulesCompanionNotice =
+          `检测到源地址有配置文件和规则文件：${companions.companionFiles.join(", ")}，将跟随rules一起导入`;
+      }
     }
 
     const imported: Array<{ name: string; sourcePath: string; reused: boolean; resourceId: string }> = [];
@@ -466,6 +662,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         created: imported.length - reused,
         items: imported,
         hooksSnapshot,
+        rulesSnapshot,
+        rulesCompanionNotice,
+        skippedLinked,
       },
     });
     return;
@@ -478,6 +677,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const targetPath = body.targetPath ? normalizeLocalPath(String(body.targetPath)) : undefined;
     const repoPath = body.repoPath ? normalizeLocalPath(String(body.repoPath)) : undefined;
     const multiToolset = Boolean(body.multiToolset);
+    const rulesCanonicalValidation = body.rulesCanonicalValidation === undefined
+      ? true
+      : Boolean(body.rulesCanonicalValidation);
 
     if (!repoUrlRaw && !repoPath) {
       throw new Error("repoUrl or repoPath is required.");
@@ -490,6 +692,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       ref,
       targetPath,
       multiToolset,
+      rulesCanonicalValidation,
     });
     jsonResponse(res, 200, { ok: true, result });
     return;
@@ -502,6 +705,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       ? body.selectedKeys.map((item) => String(item))
       : [];
     const multiToolset = Boolean(body.multiToolset);
+    const rulesCanonicalValidation = body.rulesCanonicalValidation === undefined
+      ? true
+      : Boolean(body.rulesCanonicalValidation);
 
     if (!repoPath || selectedKeys.length === 0) {
       throw new Error("repoPath and selectedKeys are required.");
@@ -511,6 +717,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       repoPath,
       selectedKeys,
       multiToolset,
+      rulesCanonicalValidation,
     });
     jsonResponse(res, 200, { ok: true, result });
     return;
@@ -537,7 +744,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
             ? "hook.txt"
             : type === "agents"
               ? "agent.txt"
-              : "command.txt");
+              : type === "rules"
+                ? "rule.rules"
+                : "command.txt");
       const targetFile = path.join(tempRoot, fileName);
       await fs.mkdir(path.dirname(targetFile), { recursive: true });
       await fs.writeFile(targetFile, content, "utf8");
@@ -601,6 +810,14 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       jsonResponse(res, 200, { ok: true, result });
       return;
     }
+    if (selected.type === "rules") {
+      if (aliasName && aliasName.trim()) {
+        throw new Error("Rules linking is batch-only and does not support aliasName.");
+      }
+      const result = await linkRulesGroup({ resourceToken, toolId, projectPath });
+      jsonResponse(res, 200, { ok: true, result });
+      return;
+    }
 
     const result = await linkResource({ resourceToken, toolId, aliasName, projectPath });
     jsonResponse(res, 200, { ok: true, result });
@@ -623,6 +840,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
 
     const state = await listState();
     const includesHooks = normalizedTypes.has("hooks");
+    const includesRules = normalizedTypes.has("rules");
     let hooksSourcePath = "";
     let hooksSourceRoot = "";
     if (includesHooks) {
@@ -632,22 +850,38 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       }
       hooksSourceRoot = hooksRootFromSourcePath(normalizeLocalPath(hooksSourcePath));
     }
+    let rulesSourcePath = "";
+    let rulesSourceRoot = "";
+    if (includesRules) {
+      rulesSourcePath = String(body.rulesSourcePath ?? "").trim();
+      if (!rulesSourcePath) {
+        throw new Error("rulesSourcePath is required when types include rules.");
+      }
+      rulesSourceRoot = rulesRootFromSourcePath(normalizeLocalPath(rulesSourcePath));
+    }
 
     const candidates = state.resources
       .filter((resource) => {
         if (!normalizedTypes.has(resource.type)) {
           return false;
         }
-        if (resource.type !== "hooks") {
-          return true;
+        if (resource.type === "hooks") {
+          return hooksRootFromSourcePath(resource.sourcePath) === hooksSourceRoot;
         }
-        return hooksRootFromSourcePath(resource.sourcePath) === hooksSourceRoot;
+        if (resource.type === "rules") {
+          return rulesRootFromSourcePath(resource.sourcePath) === rulesSourceRoot;
+        }
+        return true;
       })
       .sort((a, b) => `${a.type}/${a.name}/${a.id}`.localeCompare(`${b.type}/${b.name}/${b.id}`));
 
     const hookCandidates = includesHooks ? candidates.filter((resource) => resource.type === "hooks") : [];
     if (includesHooks && hookCandidates.length === 0) {
       throw new Error(`No hooks resources found from source '${hooksSourceRoot}'.`);
+    }
+    const ruleCandidates = includesRules ? candidates.filter((resource) => resource.type === "rules") : [];
+    if (includesRules && ruleCandidates.length === 0) {
+      throw new Error(`No rules resources found from source '${rulesSourceRoot}'.`);
     }
 
     if (candidates.length === 0) {
@@ -673,6 +907,15 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
           alreadyLinked: boolean;
         }
       | undefined;
+    let rulesCompanions:
+      | Array<{
+          path: string;
+          name: string;
+          backupPath?: string;
+          alreadyLinked: boolean;
+        }>
+      | undefined;
+    let rulesCompanionNotice: string | undefined;
     if (includesHooks) {
       const linkedConfig = await linkHooksConfigFile({
         toolId,
@@ -684,6 +927,17 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         backupPath: linkedConfig.backupPath,
         alreadyLinked: linkedConfig.alreadyLinked,
       };
+    }
+    if (includesRules) {
+      rulesCompanions = await linkRulesCompanionFiles({
+        toolId,
+        projectPath,
+        rulesSourceRoot,
+      });
+      if (rulesCompanions.length > 0) {
+        rulesCompanionNotice =
+          `检测到源地址有配置文件和规则文件：${rulesCompanions.map((item) => item.name).join(", ")}，将跟随rules一起链接`;
+      }
     }
 
     for (const resource of candidates) {
@@ -717,6 +971,8 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         alreadyLinked,
         failed,
         hooksConfig,
+        rulesCompanions,
+        rulesCompanionNotice,
       },
     });
     return;
