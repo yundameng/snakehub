@@ -3,4 +3,5 @@ dist/
 .DS_Store
 
 release/
+docs/
 snakehub-0.1.4.zip

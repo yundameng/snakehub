@@ -22,6 +22,47 @@ const RULE_SUFFIX_BY_TOOL: Record<string, string> = {
   opencow: ".md",
 };
 
+const PROJECT_SCAN_IGNORED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  "release",
+  ".idea",
+  ".vscode",
+]);
+
+async function collectScopedConfigBases(
+  projectRoot: string,
+  configDirName: string,
+): Promise<string[]> {
+  const normalizedRoot = path.resolve(projectRoot);
+  const results = new Set<string>();
+
+  async function walk(currentPath: string, depth: number): Promise<void> {
+    if (depth > 7) {
+      return;
+    }
+    const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      if (entry.name === configDirName) {
+        results.add(path.join(currentPath, entry.name));
+        continue;
+      }
+      if (entry.name.startsWith(".") || PROJECT_SCAN_IGNORED_DIRS.has(entry.name)) {
+        continue;
+      }
+      await walk(path.join(currentPath, entry.name), depth + 1);
+    }
+  }
+
+  await walk(normalizedRoot, 0);
+  return [...results];
+}
+
 async function hasExpectedRuleFileInDir(
   dirPath: string,
   expectedSuffix: string,
@@ -133,9 +174,10 @@ export async function scanTools(root = getHubRoot(), projectPath?: string): Prom
 
   for (const adapter of TOOL_ADAPTERS) {
     let detected = await adapter.detect();
+    let scopedConfigBases: string[] = [];
     if (projectPath && projectPath.trim()) {
-      const scopedBase = path.resolve(projectPath.trim(), adapter.configDirName);
-      detected = detected || (await pathExists(scopedBase));
+      scopedConfigBases = await collectScopedConfigBases(projectPath.trim(), adapter.configDirName);
+      detected = detected || scopedConfigBases.length > 0;
     }
     if (!detected) {
       results.push({
@@ -149,6 +191,23 @@ export async function scanTools(root = getHubRoot(), projectPath?: string): Prom
 
     const assetsByType = await Promise.all(
       adapter.supports.map(async (type) => {
+        if (projectPath && projectPath.trim()) {
+          const scopedTypeDirs = await Promise.all(
+            scopedConfigBases.map(async (basePath) => {
+              const candidate = path.join(basePath, type);
+              return (await pathExists(candidate)) ? candidate : "";
+            }),
+          );
+          const dirs = scopedTypeDirs.filter(Boolean);
+          if (!dirs.length) {
+            return [];
+          }
+          const scanned = await Promise.all(
+            dirs.map((dirPath) => scanTargetDir(adapter.id, type, dirPath, fingerprintToResourceId)),
+          );
+          return scanned.flat();
+        }
+
         const resolved = await resolveTargetDir(adapter.id, type, root, projectPath);
         if (!resolved.path) {
           return [];

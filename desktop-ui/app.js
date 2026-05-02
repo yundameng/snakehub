@@ -5,6 +5,8 @@ const el = {
   toolScanList: document.getElementById("toolScanList"),
   toolBrowserSelect: document.getElementById("toolBrowserSelect"),
   toolBrowserTypeSelect: document.getElementById("toolBrowserTypeSelect"),
+  toolBrowserToolTabs: document.getElementById("toolBrowserToolTabs"),
+  toolBrowserTypeTabs: document.getElementById("toolBrowserTypeTabs"),
   toolBrowserMeta: document.getElementById("toolBrowserMeta"),
   toolBrowserContent: document.getElementById("toolBrowserContent"),
   toolScopePath: document.getElementById("toolScopePath"),
@@ -20,18 +22,41 @@ const el = {
   pathTable: document.getElementById("pathTable"),
   conflictSection: document.getElementById("conflictSection"),
   conflictSummary: document.getElementById("conflictSummary"),
-  conflictTypeFilter: document.getElementById("conflictTypeFilter"),
-  conflictSearchInput: document.getElementById("conflictSearchInput"),
+  conflictTypeTabs: document.getElementById("conflictTypeTabs"),
   conflictToolTabs: document.getElementById("conflictToolTabs"),
   conflictList: document.getElementById("conflictList"),
   conflictDetail: document.getElementById("conflictDetail"),
   docsWritebackSection: document.getElementById("docsWritebackSection"),
   docsWritebackSummary: document.getElementById("docsWritebackSummary"),
-  docsWritebackProjectPath: document.getElementById("docsWritebackProjectPath"),
+  docsWritebackPathDisplay: document.getElementById("docsWritebackPathDisplay"),
   docsDetectBtn: document.getElementById("docsDetectBtn"),
   docsApplyBtn: document.getElementById("docsApplyBtn"),
   docsWritebackMeta: document.getElementById("docsWritebackMeta"),
   docsWritebackTree: document.getElementById("docsWritebackTree"),
+  resourceImportPanel: document.getElementById("resourceImportPanel"),
+  resourceImportTabs: document.getElementById("resourceImportTabs"),
+  resourceImportCurrentTitle: document.getElementById("resourceImportCurrentTitle"),
+  resourceImportGitlabTabBtn: document.getElementById("resourceImportGitlabTabBtn"),
+  resourceImportLocalTabBtn: document.getElementById("resourceImportLocalTabBtn"),
+  resourceImportGithubTabBtn: document.getElementById("resourceImportGithubTabBtn"),
+  resourceImportGitlabPane: document.getElementById("resourceImportGitlabPane"),
+  resourceImportLocalPane: document.getElementById("resourceImportLocalPane"),
+  resourceImportGithubPane: document.getElementById("resourceImportGithubPane"),
+  resourceImportDropOverlay: document.getElementById("resourceImportDropOverlay"),
+  moduleNav: document.getElementById("moduleNav"),
+  moduleNavIndicator: document.getElementById("moduleNavIndicator"),
+  logDrawerBackdrop: document.getElementById("logDrawerBackdrop"),
+  logShelf: document.getElementById("logShelf"),
+  logDock: document.getElementById("logDock"),
+  latestLogPreview: document.getElementById("latestLogPreview"),
+  logDrawer: document.getElementById("logDrawer"),
+  logDrawerCloseBtn: document.getElementById("logDrawerCloseBtn"),
+  terminalPanel: document.getElementById("terminalPanel"),
+  terminalToggleBtn: document.getElementById("terminalToggleBtn"),
+  terminalCloseBtn: document.getElementById("terminalCloseBtn"),
+  terminalOutput: document.getElementById("terminalOutput"),
+  terminalInputForm: document.getElementById("terminalInputForm"),
+  terminalInput: document.getElementById("terminalInput"),
   localDropZone: document.getElementById("localDropZone"),
   localRepoDropZone: document.getElementById("localRepoDropZone"),
   localPathInput: document.getElementById("localPathInput"),
@@ -91,6 +116,13 @@ const sourceText = {
   disabled: "禁用",
 };
 
+const TOOL_CONFIG_DIR_BY_ID = {
+  claude: ".claude",
+  cursor: ".cursor",
+  codex: ".codex",
+  opencow: ".opencow",
+};
+
 let currentOverview = null;
 let toolBrowserPickMap = new Map();
 let toolBrowserTypePickMap = new Map();
@@ -143,6 +175,16 @@ let docsWritebackDetecting = false;
 let docsWritebackApplying = false;
 let docsWritebackLastDetectedAt = 0;
 let docsWritebackAutoTimer = 0;
+let logDrawerExpanded = false;
+let activeModule = "overview";
+let moduleNavIndicatorRaf = 0;
+let activeHubType = "skills";
+let activeResourceImportTab = "gitlab";
+let terminalOpen = false;
+let terminalRunning = false;
+let removeTerminalDataListener = null;
+let removeTerminalExitListener = null;
+let resourceImportDragDepth = 0;
 
 function isRepoGroupOnlyType(type) {
   if (type === "hooks") return true;
@@ -256,10 +298,14 @@ function isRepoHistoryOverlayVisible() {
 }
 
 function updateRepoHistoryOverlayLayout() {
-  if (!el.repoPanel || !el.repoHistoryOverlay) {
+  if (!el.repoHistoryOverlay) {
     return;
   }
-  const anchorRect = el.repoPanel.getBoundingClientRect();
+  const anchor = el.resourceImportPanel || el.repoPanel;
+  if (!anchor) {
+    return;
+  }
+  const anchorRect = anchor.getBoundingClientRect();
   const rawTop = Math.round(anchorRect.top - 1);
   const left = Math.max(8, Math.round(anchorRect.left - 1));
   const rawHeight = Math.round(anchorRect.height + 2);
@@ -284,16 +330,21 @@ function updateRepoHistoryOverlayLayout() {
 }
 
 function openRepoHistoryOverlay() {
-  if (!el.repoPanel || !el.repoHistoryOverlay) {
+  if (!el.repoHistoryOverlay) {
     return;
   }
+  const overlayHost = el.resourceImportPanel || el.repoPanel;
+  if (!overlayHost) {
+    return;
+  }
+  setLogDrawerExpanded(false);
   clearRepoOverlayTimers();
   repoOverlayWide = false;
   document.body.classList.remove("repo-overlay-wide");
   updateRepoHistoryOverlayLayout();
 
-  el.repoPanel.classList.remove("overlay-open");
-  el.repoPanel.classList.add("overlay-active");
+  overlayHost.classList.remove("overlay-open");
+  overlayHost.classList.add("overlay-active");
   document.body.classList.remove("repo-overlay-backdrop-fast");
   document.body.classList.remove("repo-overlay-backdrop-visible");
   document.body.classList.remove("repo-overlay-open");
@@ -304,7 +355,7 @@ function openRepoHistoryOverlay() {
   }
 
   repoOverlayOpenTimer = window.setTimeout(() => {
-    el.repoPanel.classList.add("overlay-open");
+    overlayHost.classList.add("overlay-open");
     document.body.classList.add("repo-overlay-open");
     repoOverlayWideTimer = window.setTimeout(() => {
       repoOverlayWide = true;
@@ -321,7 +372,11 @@ function openRepoHistoryOverlay() {
 }
 
 function closeRepoHistoryOverlay() {
-  if (!el.repoPanel || !el.repoHistoryOverlay) {
+  if (!el.repoHistoryOverlay) {
+    return;
+  }
+  const overlayHost = el.resourceImportPanel || el.repoPanel;
+  if (!overlayHost) {
     return;
   }
   clearRepoOverlayTimers();
@@ -332,9 +387,9 @@ function closeRepoHistoryOverlay() {
   document.body.classList.remove("repo-overlay-backdrop-visible");
 
   repoOverlayCloseTimer = window.setTimeout(() => {
-    el.repoPanel.classList.remove("overlay-open");
+    overlayHost.classList.remove("overlay-open");
     document.body.classList.remove("repo-overlay-open");
-    el.repoPanel.classList.remove("overlay-active");
+    overlayHost.classList.remove("overlay-active");
     document.body.classList.remove("repo-overlay-active");
     repoOverlayCloseTimer = 0;
 
@@ -396,6 +451,236 @@ function activateLocalImportTab(tabValue) {
     localBatchImportContext = null;
   }
   updateActionButtonsState();
+}
+
+function setResourceImportTab(tabValue) {
+  const nextTab = tabValue === "local" || tabValue === "github" ? tabValue : "gitlab";
+  activeResourceImportTab = nextTab;
+  const gitlabActive = nextTab === "gitlab";
+  const localActive = nextTab === "local";
+  const githubActive = nextTab === "github";
+
+  if (el.resourceImportGitlabTabBtn) {
+    el.resourceImportGitlabTabBtn.classList.toggle("active", gitlabActive);
+    el.resourceImportGitlabTabBtn.setAttribute("aria-selected", String(gitlabActive));
+  }
+  if (el.resourceImportLocalTabBtn) {
+    el.resourceImportLocalTabBtn.classList.toggle("active", localActive);
+    el.resourceImportLocalTabBtn.setAttribute("aria-selected", String(localActive));
+  }
+  if (el.resourceImportGithubTabBtn) {
+    el.resourceImportGithubTabBtn.classList.toggle("active", githubActive);
+    el.resourceImportGithubTabBtn.setAttribute("aria-selected", String(githubActive));
+  }
+
+  if (el.resourceImportGitlabPane) {
+    el.resourceImportGitlabPane.classList.toggle("active", gitlabActive);
+    el.resourceImportGitlabPane.hidden = !gitlabActive;
+  }
+  if (el.resourceImportLocalPane) {
+    el.resourceImportLocalPane.classList.toggle("active", localActive);
+    el.resourceImportLocalPane.hidden = !localActive;
+  }
+  if (el.resourceImportGithubPane) {
+    el.resourceImportGithubPane.classList.toggle("active", githubActive);
+    el.resourceImportGithubPane.hidden = !githubActive;
+  }
+
+  const showHistoryBadge = gitlabActive || localActive;
+  if (el.repoHistoryBadge) {
+    el.repoHistoryBadge.hidden = !showHistoryBadge;
+  }
+  if (el.resourceImportCurrentTitle) {
+    if (gitlabActive) {
+      el.resourceImportCurrentTitle.textContent = "从GitLab下载并导入中心仓库（内部）";
+    } else if (localActive) {
+      el.resourceImportCurrentTitle.textContent = "从本地路径导入";
+    } else {
+      el.resourceImportCurrentTitle.textContent = "从GitHub仓库导入（外部）";
+    }
+  }
+  if (!showHistoryBadge && isRepoHistoryOverlayVisible()) {
+    closeRepoHistoryOverlay();
+  }
+}
+
+function appendTerminalOutput(text) {
+  if (!el.terminalOutput) {
+    return;
+  }
+  const content = String(text || "");
+  if (!content) {
+    return;
+  }
+  el.terminalOutput.textContent = `${el.terminalOutput.textContent}${content}`.slice(-120000);
+  el.terminalOutput.scrollTop = el.terminalOutput.scrollHeight;
+}
+
+function setTerminalOpen(nextOpen) {
+  terminalOpen = Boolean(nextOpen);
+  document.body.classList.toggle("terminal-open", terminalOpen);
+  if (el.terminalPanel) {
+    el.terminalPanel.setAttribute("aria-hidden", terminalOpen ? "false" : "true");
+  }
+  if (el.terminalToggleBtn) {
+    el.terminalToggleBtn.setAttribute("aria-expanded", terminalOpen ? "true" : "false");
+  }
+  if (terminalOpen && el.terminalInput instanceof HTMLInputElement) {
+    window.setTimeout(() => {
+      el.terminalInput.focus();
+    }, 30);
+  }
+}
+
+function bindTerminalListeners() {
+  if (!window.cowhubDesktop) {
+    return;
+  }
+  if (typeof window.cowhubDesktop.onTerminalData === "function" && !removeTerminalDataListener) {
+    removeTerminalDataListener = window.cowhubDesktop.onTerminalData((payload) => {
+      appendTerminalOutput(payload && payload.data ? payload.data : "");
+    });
+  }
+  if (typeof window.cowhubDesktop.onTerminalExit === "function" && !removeTerminalExitListener) {
+    removeTerminalExitListener = window.cowhubDesktop.onTerminalExit((payload) => {
+      terminalRunning = false;
+      const code = payload && typeof payload.code === "number" ? payload.code : 0;
+      const signal = payload && payload.signal ? String(payload.signal) : "";
+      appendTerminalOutput(`\n[terminal exited] code=${code}${signal ? ` signal=${signal}` : ""}\n`);
+    });
+  }
+}
+
+async function ensureTerminalStarted() {
+  if (!window.cowhubDesktop || typeof window.cowhubDesktop.terminalStart !== "function") {
+    appendTerminalOutput("[terminal unavailable] 仅在 Electron 桌面环境可用。\n");
+    return false;
+  }
+  bindTerminalListeners();
+  if (terminalRunning) {
+    return true;
+  }
+  try {
+    const result = await window.cowhubDesktop.terminalStart();
+    terminalRunning = true;
+    const shell = result && result.shell ? String(result.shell) : "";
+    appendTerminalOutput(`[terminal started] ${shell || "shell"}\n`);
+    return true;
+  } catch (error) {
+    appendTerminalOutput(`[terminal error] ${getErrorMessage(error)}\n`);
+    return false;
+  }
+}
+
+function isResourceImportModuleActive() {
+  return activeModule === "resource-import";
+}
+
+function hasFileDrag(event) {
+  const dt = event.dataTransfer;
+  if (!dt || !dt.types) {
+    return false;
+  }
+  const types = Array.from(dt.types);
+  return types.includes("Files");
+}
+
+function setResourceImportDropOverlayVisible(visible) {
+  if (!el.resourceImportDropOverlay) {
+    return;
+  }
+  el.resourceImportDropOverlay.classList.toggle("visible", Boolean(visible));
+  el.resourceImportDropOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
+async function inspectDroppedPath(pathValue) {
+  if (!window.cowhubDesktop || typeof window.cowhubDesktop.inspectPath !== "function") {
+    return { exists: false, isDirectory: false, hasImportDirs: false };
+  }
+  try {
+    const result = await window.cowhubDesktop.inspectPath(pathValue);
+    return {
+      exists: Boolean(result && result.exists),
+      isDirectory: Boolean(result && result.isDirectory),
+      hasImportDirs: Boolean(result && result.hasImportDirs),
+    };
+  } catch {
+    return { exists: false, isDirectory: false, hasImportDirs: false };
+  }
+}
+
+function shellEscape(value) {
+  const text = String(value || "");
+  if (!text) {
+    return "''";
+  }
+  return `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
+function shouldFallbackToTerminalClone(errorMessage) {
+  const text = String(errorMessage || "").toLowerCase();
+  if (!text) {
+    return false;
+  }
+  const patterns = ["permission", "eacces", "eperm", "denied", "not permitted", "operation not permitted", "权限"];
+  return patterns.some((token) => text.includes(token));
+}
+
+async function buildGitCloneCommand(input) {
+  const repoUrl = String(input.repoUrl || "").trim();
+  const ref = String(input.ref || "").trim();
+  const requestedTargetPath = String(input.targetPath || "").trim();
+  let targetPath = requestedTargetPath;
+  if (!targetPath && window.cowhubDesktop && typeof window.cowhubDesktop.getManagedRepoPath === "function") {
+    try {
+      targetPath = String(await window.cowhubDesktop.getManagedRepoPath(repoUrl) || "").trim();
+    } catch {
+      targetPath = "";
+    }
+  }
+  if (!targetPath) {
+    targetPath = "~/.snakehub/repos/repo-fallback";
+  }
+  if (!repoUrl) {
+    return "";
+  }
+  let cloneCommand = "git clone";
+  if (ref) {
+    cloneCommand += ` --branch ${shellEscape(ref)} --single-branch`;
+  }
+  cloneCommand += ` ${shellEscape(repoUrl)}`;
+  if (!targetPath) {
+    return cloneCommand;
+  }
+  return `mkdir -p ${shellEscape(targetPath)} && cd ${shellEscape(targetPath)} && ${cloneCommand}`;
+}
+
+async function fallbackRepoScanByTerminalClone(payload, errorMessage) {
+  if (activeResourceImportTab !== "gitlab") {
+    return false;
+  }
+  if (!shouldFallbackToTerminalClone(errorMessage)) {
+    return false;
+  }
+  const command = await buildGitCloneCommand(payload);
+  if (!command) {
+    return false;
+  }
+
+  const started = await ensureTerminalStarted();
+  if (!started || !window.cowhubDesktop || typeof window.cowhubDesktop.terminalWrite !== "function") {
+    return false;
+  }
+
+  setTerminalOpen(true);
+  appendTerminalOutput(`\n[fallback] 检测到权限问题，尝试使用本地终端执行 git clone：\n$ ${command}\n`);
+  try {
+    await window.cowhubDesktop.terminalWrite(`${command}\n`);
+    return true;
+  } catch (error) {
+    appendTerminalOutput(`[fallback write error] ${getErrorMessage(error)}\n`);
+    return false;
+  }
 }
 
 function updateRepoScanButtonState() {
@@ -572,11 +857,12 @@ function renderDocsWritebackTreeNodes(nodes) {
 }
 
 function renderDocsWritebackModule() {
-  if (!el.docsWritebackSummary || !el.docsWritebackProjectPath || !el.docsWritebackMeta || !el.docsWritebackTree) {
+  if (!el.docsWritebackSummary || !el.docsWritebackPathDisplay || !el.docsWritebackMeta || !el.docsWritebackTree) {
     return;
   }
 
-  el.docsWritebackProjectPath.value = docsWritebackProjectPath || "";
+  el.docsWritebackPathDisplay.textContent = docsWritebackProjectPath || "--";
+  el.docsWritebackPathDisplay.title = docsWritebackProjectPath || "--";
 
   if (!docsWritebackProjectPath) {
     el.docsWritebackSummary.textContent = "未就绪";
@@ -846,9 +1132,43 @@ function expectedRuleExtensionForTool(toolId) {
   return "";
 }
 
+function setLatestLogPreview(text) {
+  if (!el.latestLogPreview) {
+    return;
+  }
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  const content = normalized || "暂无日志";
+  el.latestLogPreview.textContent = content;
+  el.latestLogPreview.title = content;
+}
+
+function setLogDrawerExpanded(expanded) {
+  const next = Boolean(expanded);
+  logDrawerExpanded = next;
+  document.body.classList.toggle("log-drawer-open", next);
+  if (el.logShelf) {
+    el.logShelf.classList.toggle("expanded", next);
+  }
+  if (el.logDrawer) {
+    el.logDrawer.setAttribute("aria-hidden", next ? "false" : "true");
+  }
+  if (el.logDrawerBackdrop) {
+    el.logDrawerBackdrop.setAttribute("aria-hidden", next ? "false" : "true");
+  }
+  if (el.logDock) {
+    el.logDock.setAttribute("aria-expanded", next ? "true" : "false");
+  }
+}
+
+function toggleLogDrawer() {
+  setLogDrawerExpanded(!logDrawerExpanded);
+}
+
 function log(message) {
   const ts = new Date().toLocaleTimeString();
-  el.eventLog.textContent = `[${ts}] ${message}\n${el.eventLog.textContent}`.slice(0, 12000);
+  const logLine = `[${ts}] ${message}`;
+  el.eventLog.textContent = `${logLine}\n${el.eventLog.textContent}`.slice(0, 12000);
+  setLatestLogPreview(logLine);
 }
 
 function formatOperationTime(iso) {
@@ -889,9 +1209,8 @@ function renderOperationRecords(operations) {
     rollback: "回滚",
     remove: "移除",
   };
-
   el.operationRecords.innerHTML = list
-    .map((op) => {
+    .map((op, index) => {
       const details = op && typeof op === "object" ? op.details || {} : {};
       const opType = String(op.type || "");
       const operationId = String(op.id || "");
@@ -965,12 +1284,92 @@ function getBrowserScopePayload() {
 }
 
 function renderScopeInputs() {
-  if (el.toolScopePath) {
-    el.toolScopePath.value = currentBrowserScopePath || "";
+  if (el.toolScopePath instanceof HTMLButtonElement) {
+    el.toolScopePath.textContent = currentBrowserScopePath || "点击选择项目目录，未选则展示全局技能";
+    el.toolScopePath.classList.toggle("active", Boolean(currentBrowserScopePath));
   }
-  if (el.linkScopePath) {
-    el.linkScopePath.value = currentLinkScopePath || "";
+  if (el.linkScopeClearBtn) {
+    el.linkScopeClearBtn.hidden = !currentLinkScopePath;
   }
+  if (el.toolScopeClearBtn) {
+    el.toolScopeClearBtn.hidden = !currentBrowserScopePath;
+  }
+  if (el.linkScopePath instanceof HTMLButtonElement) {
+    el.linkScopePath.textContent = currentLinkScopePath || "点击选择项目目录，未选则展示全局技能";
+    el.linkScopePath.classList.toggle("active", Boolean(currentLinkScopePath));
+  }
+}
+
+function syncToolBrowserTabs() {
+  const selectedToolId = (el.toolBrowserSelect && "value" in el.toolBrowserSelect ? el.toolBrowserSelect.value : "") || "cursor";
+  const selectedType = (el.toolBrowserTypeSelect && "value" in el.toolBrowserTypeSelect ? el.toolBrowserTypeSelect.value : "") || "skills";
+  if (el.toolBrowserToolTabs) {
+    [...el.toolBrowserToolTabs.querySelectorAll("[data-tool-id]")].forEach((btn) => {
+      const active = (btn.getAttribute("data-tool-id") || "") === selectedToolId;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
+  if (el.toolBrowserTypeTabs) {
+    [...el.toolBrowserTypeTabs.querySelectorAll("[data-type-id]")].forEach((btn) => {
+      const active = (btn.getAttribute("data-type-id") || "") === selectedType;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
+}
+
+function setActiveModule(moduleKey, smoothScroll = true) {
+  const target = String(moduleKey || "");
+  const navButtons = el.moduleNav ? [...el.moduleNav.querySelectorAll("[data-module-target]")] : [];
+  const available = new Set(navButtons.map((btn) => btn.getAttribute("data-module-target") || ""));
+  const next = available.has(target) ? target : "overview";
+  activeModule = next;
+
+  const panels = document.querySelectorAll(".module-panel");
+  panels.forEach((panel) => {
+    const key = panel.getAttribute("data-module") || "";
+    panel.classList.toggle("active", key === next);
+  });
+
+  navButtons.forEach((btn) => {
+    const matched = (btn.getAttribute("data-module-target") || "") === next;
+    btn.classList.toggle("active", matched);
+    btn.setAttribute("aria-selected", matched ? "true" : "false");
+  });
+  updateModuleNavIndicator();
+
+  if (isRepoHistoryOverlayVisible()) {
+    closeRepoHistoryOverlay();
+  }
+
+  if (smoothScroll) {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+}
+
+function updateModuleNavIndicator() {
+  if (moduleNavIndicatorRaf) {
+    window.cancelAnimationFrame(moduleNavIndicatorRaf);
+    moduleNavIndicatorRaf = 0;
+  }
+  moduleNavIndicatorRaf = window.requestAnimationFrame(() => {
+    moduleNavIndicatorRaf = 0;
+    if (!el.moduleNav || !el.moduleNavIndicator) {
+      return;
+    }
+    const activeBtn = el.moduleNav.querySelector(".module-nav-btn.active");
+    if (!(activeBtn instanceof HTMLElement)) {
+      el.moduleNavIndicator.style.opacity = "0";
+      return;
+    }
+    const navRect = el.moduleNav.getBoundingClientRect();
+    const btnRect = activeBtn.getBoundingClientRect();
+    const top = btnRect.top - navRect.top;
+    el.moduleNavIndicator.style.top = `${Math.max(0, Math.round(top))}px`;
+    el.moduleNavIndicator.style.height = `${Math.max(0, Math.round(btnRect.height))}px`;
+    el.moduleNavIndicator.style.opacity = "1";
+  });
 }
 
 function getSelectedLinkToolId() {
@@ -993,11 +1392,11 @@ function updateLinkRulesHint() {
   }
   el.linkRulesHint.classList.remove("loading");
   if (!currentLinkScopePath) {
-    el.linkRulesHint.textContent = `适配 ${toolId} 的「全局」rules规则默认会被链接`;
+    el.linkRulesHint.textContent = `适配 ${toolId} 的「全局」rules匹配项默认已勾选，可取消`;
     return;
   }
   if (currentLinkRulesBucket) {
-    el.linkRulesHint.textContent = `适配 ${toolId} 的「${currentLinkRulesBucket}」rules规则默认会被链接`;
+    el.linkRulesHint.textContent = `适配 ${toolId} 的「${currentLinkRulesBucket}」rules匹配项默认已勾选，可取消`;
     return;
   }
   el.linkRulesHint.textContent = "未识别项目类型，创建链接时将再次检测";
@@ -1286,7 +1685,6 @@ function renderConflictModule() {
         .join("")
     : `<div class="asset-empty">当前筛选下无冲突工具</div>`;
 
-  const keyword = selectedConflictSearch.trim().toLowerCase();
   const filtered = currentConflictRecords.filter((item) => {
     if (selectedConflictToolId && item.toolId !== selectedConflictToolId) {
       return false;
@@ -1294,11 +1692,17 @@ function renderConflictModule() {
     if (selectedConflictType !== "all" && item.type !== selectedConflictType) {
       return false;
     }
-    if (keyword && !item.name.toLowerCase().includes(keyword) && !item.assetPath.toLowerCase().includes(keyword)) {
-      return false;
-    }
     return true;
   });
+
+  if (el.conflictTypeTabs) {
+    [...el.conflictTypeTabs.querySelectorAll("[data-conflict-type]")].forEach((btn) => {
+      const type = btn.getAttribute("data-conflict-type") || "all";
+      const active = type === selectedConflictType;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
 
   const scopeHint = currentBrowserScopePath ? "" : "（未选项目目录，仅展示中心仓库重复）";
   el.conflictSummary.textContent = `总冲突 ${currentConflictRecords.length} / 当前 ${filtered.length}${scopeHint}`;
@@ -1365,14 +1769,12 @@ function renderConflictModule() {
 }
 
 function focusConflict(conflictId, toolId, type) {
+  setActiveModule("conflict", false);
   if (toolId) {
     selectedConflictToolId = toolId;
   }
   if (type) {
     selectedConflictType = type;
-  }
-  if (el.conflictTypeFilter) {
-    el.conflictTypeFilter.value = selectedConflictType;
   }
 
   const found = currentConflictRecords.find((item) => item.id === conflictId);
@@ -1422,6 +1824,7 @@ function renderCards(state, scan) {
 
 function renderHubStoreResources(resources) {
   const order = ["skills", "commands", "hooks", "rules", "agents"];
+  const tabTypes = ["skills", "commands", "hooks", "rules"];
   const grouped = {
     skills: [],
     commands: [],
@@ -1440,58 +1843,82 @@ function renderHubStoreResources(resources) {
     grouped[key].sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  const groups = order
-    .map((type) => {
-      const list = grouped[type];
-      const label = type;
-      const rows = list
-        .map(
-          (item) => `
-          <li class="hub-row">
-            <div class="hub-row-head">
-              <span class="mono">${escapeHtml(item.name)}</span>${renderRuleToolBadgeByPath(item.type, item.sourcePath)}
-              <span class="hub-row-id">${escapeHtml(item.id)}</span>
-              <button
-                type="button"
-                class="hub-delete-btn"
-                data-resource-id="${escapeHtml(item.id)}"
-                data-resource-type="${escapeHtml(item.type)}"
-                data-resource-name="${escapeHtml(item.name)}"
-                title="移出中心仓库"
-                aria-label="移出中心仓库"
-              >
-                🗑
-              </button>
-            </div>
-            <div class="hub-row-time">导入时间：${escapeHtml(formatOperationTime(String(item.createdAt || "")))}</div>
-            <div class="asset-path">${escapeHtml(item.storePath)}</div>
-          </li>
-        `,
-        )
-        .join("");
+  if (!tabTypes.includes(activeHubType)) {
+    activeHubType = "skills";
+  }
+  const currentType = activeHubType;
+  const currentList = grouped[currentType] || [];
+  const rows = currentList
+    .map(
+      (item) => `
+      <li class="hub-row">
+        <div class="hub-row-head">
+          <span class="mono">${escapeHtml(item.name)}</span>${renderRuleToolBadgeByPath(item.type, item.sourcePath)}
+          <span class="hub-row-id">${escapeHtml(item.id)}</span>
+          <button
+            type="button"
+            class="hub-delete-btn"
+            data-resource-id="${escapeHtml(item.id)}"
+            data-resource-type="${escapeHtml(item.type)}"
+            data-resource-name="${escapeHtml(item.name)}"
+            title="移出中心仓库"
+            aria-label="移出中心仓库"
+          >
+            🗑
+          </button>
+        </div>
+        <div class="hub-row-time">导入时间：${escapeHtml(formatOperationTime(String(item.createdAt || "")))}</div>
+        <div class="asset-path">${escapeHtml(item.storePath)}</div>
+      </li>
+    `,
+    )
+    .join("");
 
-      return `
-        <section class="hub-group">
-          <div class="hub-group-title">${label}（${list.length}）</div>
-          ${
-            rows
-              ? `<ul class="asset-list">${rows}</ul>`
-              : `<div class="asset-empty">中心仓库中当前无 ${label}</div>`
-          }
-        </section>
-      `;
+  const tabs = tabTypes
+    .map((type) => {
+      const count = (grouped[type] || []).length;
+      const active = type === currentType;
+      return `<button
+        type="button"
+        class="hub-tab${active ? " active" : ""}"
+        data-hub-type="${escapeHtml(type)}"
+        aria-selected="${active ? "true" : "false"}"
+      >${escapeHtml(type)}（${count}）</button>`;
     })
     .join("");
 
   el.toolScanList.innerHTML = `
+    <div class="hub-tabs" role="tablist" aria-label="中心仓库资源分类">${tabs}</div>
     <div class="tool-meta">以下为中心仓库（~/.snakehub/store）中的资源分组：</div>
-    <div class="hub-grid">${groups}</div>
+    <section class="hub-group">
+      ${
+        rows
+          ? `<ul class="asset-list">${rows}</ul>`
+          : `<div class="asset-empty">中心仓库中当前无 ${escapeHtml(currentType)}</div>`
+      }
+    </section>
   `;
 }
 
 function renderResourceOptions(resources) {
   const previousValues = new Set(getSelectedResourceIds());
-  const filtered = resources.filter((resource) => resource.type !== "rules");
+  const selectedToolId = getSelectedLinkToolId();
+  const visibleTypes = ["skills", "commands", "hooks", "rules"];
+  const grouped = {
+    skills: [],
+    commands: [],
+    hooks: [],
+    rules: [],
+  };
+  for (const resource of resources || []) {
+    if (grouped[resource.type]) {
+      grouped[resource.type].push(resource);
+    }
+  }
+  for (const type of visibleTypes) {
+    grouped[type].sort((a, b) => a.name.localeCompare(b.name));
+  }
+  const filtered = visibleTypes.flatMap((type) => grouped[type]);
 
   if (filtered.length === 0) {
     el.resourceChecklist.innerHTML = `<div class="asset-empty">（当前无可链接资源）</div>`;
@@ -1499,25 +1926,60 @@ function renderResourceOptions(resources) {
     return;
   }
 
-  const nextSelection = filtered
-    .filter((resource) => previousValues.has(resource.id))
-    .map((resource) => resource.id);
-  if (nextSelection.length === 0) {
-    nextSelection.push(filtered[0].id);
+  const nextSelectionSet = new Set(
+    filtered
+      .filter((resource) => resource.type !== "rules" && previousValues.has(resource.id))
+      .map((resource) => resource.id),
+  );
+  if (nextSelectionSet.size === 0) {
+    const firstNonRule = filtered.find((resource) => resource.type !== "rules");
+    if (firstNonRule) {
+      nextSelectionSet.add(firstNonRule.id);
+    }
   }
-  const nextSelectionSet = new Set(nextSelection);
 
-  el.resourceChecklist.innerHTML = filtered
-    .map((r) => {
-      const checked = nextSelectionSet.has(r.id) ? "checked" : "";
+  const expectedRuleTool = selectedToolId || "";
+  for (const ruleItem of grouped.rules) {
+    const pathValue = String(ruleItem.sourcePath || ruleItem.storePath || ruleItem.path || "");
+    const detectedTool = detectRuleToolByPath(pathValue);
+    if (detectedTool && detectedTool === expectedRuleTool) {
+      nextSelectionSet.add(ruleItem.id);
+      continue;
+    }
+    if (!detectedTool) {
+      const ext = expectedRuleExtensionForTool(expectedRuleTool);
+      if (ext && pathValue.toLowerCase().endsWith(ext)) {
+        nextSelectionSet.add(ruleItem.id);
+      }
+    }
+  }
+
+  const sections = visibleTypes
+    .map((type) => {
+      const list = grouped[type];
+      const rows = list
+        .map((r) => {
+          const checked = nextSelectionSet.has(r.id) ? "checked" : "";
+          const ruleToolBadge = renderRuleToolBadgeByPath(r.type, String(r.sourcePath || r.storePath || ""));
+          return `
+            <label class="resource-check-item">
+              <input type="checkbox" name="resourceTokens" value="${escapeHtml(r.id)}" ${checked} />
+              <span>${escapeHtml(r.name)}${ruleToolBadge}</span>
+            </label>
+          `;
+        })
+        .join("");
       return `
-        <label class="resource-check-item">
-          <input type="checkbox" name="resourceTokens" value="${escapeHtml(r.id)}" ${checked} />
-          <span>${escapeHtml(`${r.name}（${r.type}）`)}</span>
-        </label>
+        <section class="resource-check-group">
+          <div class="resource-check-title">${escapeHtml(type)}（${list.length}）</div>
+          <div class="resource-check-items">
+            ${rows || `<div class="asset-empty">无</div>`}
+          </div>
+        </section>
       `;
     })
     .join("");
+  el.resourceChecklist.innerHTML = `<div class="resource-check-grid">${sections}</div>`;
 
   updateLinkRulesHint();
   updateLinkCreateButtonState();
@@ -1673,13 +2135,62 @@ function groupAssetsByType(assets) {
   return map;
 }
 
+function normalizePathForMatch(value) {
+  return String(value || "").replaceAll("\\", "/");
+}
+
+function getScopedProjectGroupKey(assetPath, projectRoot, configDirName) {
+  const normalizedAsset = normalizePathForMatch(assetPath);
+  const normalizedRoot = normalizePathForMatch(projectRoot).replace(/\/+$/, "");
+  if (!normalizedAsset || !normalizedRoot || !configDirName) {
+    return "";
+  }
+  const rootPrefix = `${normalizedRoot}/`;
+  if (!normalizedAsset.startsWith(rootPrefix)) {
+    return "";
+  }
+  const rel = normalizedAsset.slice(rootPrefix.length);
+  if (rel === configDirName || rel.startsWith(`${configDirName}/`)) {
+    return ".";
+  }
+  const marker = `/${configDirName}/`;
+  const idx = rel.indexOf(marker);
+  if (idx === -1) {
+    return "";
+  }
+  return rel.slice(0, idx);
+}
+
+function collectScopedProjectGroups(allAssets, selectedAssets, projectRoot, configDirName) {
+  const keySet = new Set();
+  for (const asset of allAssets) {
+    const key = getScopedProjectGroupKey(asset.path, projectRoot, configDirName);
+    if (key) {
+      keySet.add(key);
+    }
+  }
+
+  const sortedKeys = [...keySet].sort((a, b) => {
+    if (a === ".") return -1;
+    if (b === ".") return 1;
+    return a.localeCompare(b);
+  });
+
+  return sortedKeys.map((key) => {
+    const label = key === "." ? configDirName : `${key}/${configDirName}`;
+    const items = selectedAssets.filter((asset) => getScopedProjectGroupKey(asset.path, projectRoot, configDirName) === key);
+    return { key, label, items };
+  });
+}
+
 function renderToolBrowser() {
   if (!currentOverview) {
     return;
   }
 
-  const selectedToolId = el.toolBrowserSelect.value || "cursor";
-  const selectedType = el.toolBrowserTypeSelect.value || "skills";
+  const selectedToolId = (el.toolBrowserSelect && "value" in el.toolBrowserSelect ? el.toolBrowserSelect.value : "") || "cursor";
+  const selectedType = (el.toolBrowserTypeSelect && "value" in el.toolBrowserTypeSelect ? el.toolBrowserTypeSelect.value : "") || "skills";
+  syncToolBrowserTabs();
   const tool = currentOverview.scan.find((item) => item.toolId === selectedToolId);
   const pathItems = currentOverview.paths.filter((item) => item.toolId === selectedToolId);
 
@@ -1712,81 +2223,113 @@ function renderToolBrowser() {
   const selectedTypePath = pathItems.find((item) => item.type === selectedType)?.path || "";
   const canPickItemByType = selectedType !== "hooks" && selectedType !== "rules";
   const selectedTypeLabel = typeText[selectedType] || selectedType;
+  const configDirName = TOOL_CONFIG_DIR_BY_ID[selectedToolId] || "";
+  const scopedGroups =
+    currentBrowserScopePath && configDirName
+      ? collectScopedProjectGroups(tool.assets || [], list, currentBrowserScopePath, configDirName)
+      : [];
+  const isMultiProject = scopedGroups.length > 1;
+
   el.toolBrowserMeta.textContent =
     `${tool.toolName}（${tool.toolId}）` +
     ` · 当前筛选：${selectedTypeLabel}` +
-    ` · 目录：${pathHint || "无路径信息"}`;
+    ` · 目录：${pathHint || "无路径信息"}` +
+    (isMultiProject ? " · 多项目树模式" : "");
 
   const nextPickMap = new Map();
   const linkedSourcePaths = [];
   let importableCount = 0;
-  const items = list
-    .map((asset, index) => {
-      const pickKey = `${selectedToolId}:${selectedType}:${index}`;
-      const assetKey = `${selectedToolId}|${asset.path}`;
-      const linkedMapping = (currentOverview.state.mappings || []).find(
-        (mapping) =>
-          mapping.active &&
-          mapping.toolId === selectedToolId &&
-          mapping.linkPath === asset.path &&
-          asset.duplicateResourceId &&
-          mapping.resourceId === asset.duplicateResourceId,
-      );
-      const isLinkedByCowHub = Boolean(linkedMapping);
-      if (isLinkedByCowHub) {
-        linkedSourcePaths.push(asset.path);
-      } else {
-        importableCount += 1;
-      }
-      const showItemPickButton = canPickItemByType && !isLinkedByCowHub;
-      if (showItemPickButton) {
-        nextPickMap.set(pickKey, asset);
-      }
-      const mergeConflictId = mergeConflictIdByAssetKey.get(assetKey);
-      const ruleToolBadge = renderRuleToolBadgeByPath(asset.type, asset.path);
-      let statusTag = "";
-      if (isLinkedByCowHub) {
-        statusTag = ` <span class="asset-tag linked">已链接</span>`;
-      } else if (mergeConflictId) {
-        statusTag = `
-          <button
-            type="button"
-            class="asset-tag mergeable conflict-jump-btn"
-            data-conflict-id="${escapeHtml(mergeConflictId)}"
-            data-tool-id="${escapeHtml(selectedToolId)}"
-            data-type="${escapeHtml(selectedType)}"
-          >
-            可合并
-          </button>
-        `;
-      }
-      return `
-        <li class="asset-row">
-          <div class="asset-row-head">
-            <span class="mono">${escapeHtml(asset.name)}</span>${ruleToolBadge}${statusTag}
-            ${
-              showItemPickButton
-                ? `
+
+  const renderAssetRows = (assetList, groupToken) =>
+    assetList
+      .map((asset, index) => {
+        const pickKey = `${selectedToolId}:${selectedType}:${groupToken}:${index}`;
+        const assetKey = `${selectedToolId}|${asset.path}`;
+        const linkedMapping = (currentOverview.state.mappings || []).find(
+          (mapping) =>
+            mapping.active &&
+            mapping.toolId === selectedToolId &&
+            mapping.linkPath === asset.path &&
+            asset.duplicateResourceId &&
+            mapping.resourceId === asset.duplicateResourceId,
+        );
+        const isLinkedByCowHub = Boolean(linkedMapping);
+        if (isLinkedByCowHub) {
+          linkedSourcePaths.push(asset.path);
+        } else {
+          importableCount += 1;
+        }
+        const showItemPickButton = canPickItemByType && !isLinkedByCowHub;
+        if (showItemPickButton) {
+          nextPickMap.set(pickKey, asset);
+        }
+        const mergeConflictId = mergeConflictIdByAssetKey.get(assetKey);
+        const ruleToolBadge = renderRuleToolBadgeByPath(asset.type, asset.path);
+        let statusTag = "";
+        if (isLinkedByCowHub) {
+          statusTag = ` <span class="asset-tag linked">已链接</span>`;
+        } else if (mergeConflictId) {
+          statusTag = `
             <button
               type="button"
-              class="asset-pick-btn"
-              data-pick-key="${escapeHtml(pickKey)}"
-              title="填入“从本地路径导入”表单"
+              class="asset-tag mergeable conflict-jump-btn"
+              data-conflict-id="${escapeHtml(mergeConflictId)}"
+              data-tool-id="${escapeHtml(selectedToolId)}"
+              data-type="${escapeHtml(selectedType)}"
             >
-              ->
+              可合并
             </button>
-            `
-                : ""
-            }
+          `;
+        }
+        return `
+          <div class="browser-table-row">
+            <div class="browser-cell browser-cell-name mono">${escapeHtml(asset.name)}${ruleToolBadge}${statusTag}</div>
+            <div class="browser-cell browser-cell-path">${escapeHtml(asset.path)}</div>
+            <div class="browser-cell browser-cell-action">
+              ${
+                showItemPickButton
+                  ? `
+              <button
+                type="button"
+                class="asset-pick-btn browser-link-btn"
+                data-pick-key="${escapeHtml(pickKey)}"
+                title="填入“从本地路径导入”表单"
+              >
+                链接
+              </button>
+              `
+                  : ""
+              }
+            </div>
           </div>
-          <div class="asset-path">${escapeHtml(asset.path)}</div>
-        </li>
-      `;
-    })
-    .join("");
+        `;
+      })
+      .join("");
+
+  let contentHtml = "";
+  if (isMultiProject) {
+    const groupItems = scopedGroups
+      .map((group) => {
+        const rows = renderAssetRows(group.items || [], group.key || "root");
+        return `
+          <li class="browser-tree-node">
+            <details open>
+              <summary class="mono">${escapeHtml(group.label)}</summary>
+              ${rows ? `<div class="browser-table">${rows}</div>` : `<div class="asset-empty">当前无 ${escapeHtml(selectedType)}</div>`}
+            </details>
+          </li>
+        `;
+      })
+      .join("");
+    contentHtml = groupItems ? `<ul class="browser-tree">${groupItems}</ul>` : `<div class="asset-empty">当前无 ${selectedType}</div>`;
+  } else {
+    const rows = renderAssetRows(list, "single");
+    contentHtml = rows ? `<div class="browser-table">${rows}</div>` : `<div class="asset-empty">当前无 ${selectedType}</div>`;
+  }
+
   toolBrowserPickMap = nextPickMap;
   const typeDirPickKey = `${selectedToolId}:${selectedType}:${selectedTypePath || "-"}`;
-  const canPickTypeDir = Boolean(selectedTypePath) && importableCount > 0;
+  const canPickTypeDir = !isMultiProject && Boolean(selectedTypePath) && importableCount > 0;
   const nextTypePickMap = new Map();
   if (canPickTypeDir) {
     nextTypePickMap.set(typeDirPickKey, {
@@ -1813,13 +2356,13 @@ function renderToolBrowser() {
           data-type-pick-key="${escapeHtml(typeDirPickKey)}"
           title="填入“从本地路径导入”并按该类型启用批量导入/批量链接（已链接项将自动跳过）"
         >
-          ->
+          链接所有
         </button>
         `
             : ""
         }
       </div>
-      ${items ? `<ul class="asset-list">${items}</ul>` : `<div class="asset-empty">当前无 ${selectedType}</div>`}
+      ${contentHtml}
     </article>
   `;
 }
@@ -2047,6 +2590,7 @@ function bindDnD() {
       log(`拖拽路径无效（非绝对路径）：${dropped}。请点击“技能仓库路径”选择目录。`);
       return;
     }
+    setResourceImportTab("local");
     activateLocalImportTab("repo");
     if (el.localRepoPathInput) {
       el.localRepoPathInput.value = dropped;
@@ -2055,6 +2599,80 @@ function bindDnD() {
     log(`已捕获技能仓库路径：${dropped}`);
     submitLocalRepoScanForm();
   });
+
+  const onDragEnter = (event) => {
+    if (!isResourceImportModuleActive() || !hasFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    resourceImportDragDepth += 1;
+    setResourceImportDropOverlayVisible(true);
+  };
+  const onDragOver = (event) => {
+    if (!isResourceImportModuleActive() || !hasFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+    setResourceImportDropOverlayVisible(true);
+  };
+  const onDragLeave = (event) => {
+    if (!isResourceImportModuleActive()) {
+      return;
+    }
+    event.preventDefault();
+    resourceImportDragDepth = Math.max(0, resourceImportDragDepth - 1);
+    if (resourceImportDragDepth === 0) {
+      setResourceImportDropOverlayVisible(false);
+    }
+  };
+  const onDrop = async (event) => {
+    if (!isResourceImportModuleActive() || !hasFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    resourceImportDragDepth = 0;
+    setResourceImportDropOverlayVisible(false);
+
+    const dropped = extractDroppedPath(event);
+    if (!dropped) {
+      log("拖拽已忽略：未提取到有效路径");
+      return;
+    }
+    const isAbsolutePath = /^[A-Za-z]:\\/.test(dropped) || dropped.startsWith("/") || dropped.startsWith("\\\\");
+    if (!isAbsolutePath) {
+      log(`拖拽路径无效（非绝对路径）：${dropped}`);
+      return;
+    }
+
+    setResourceImportTab("local");
+    const info = await inspectDroppedPath(dropped);
+    if (info.isDirectory && info.hasImportDirs) {
+      activateLocalImportTab("repo");
+      if (el.localRepoPathInput) {
+        el.localRepoPathInput.value = dropped;
+      }
+      updateLocalRepoScanButtonState();
+      log(`已识别为技能仓库目录：${dropped}`);
+      submitLocalRepoScanForm();
+      return;
+    }
+
+    activateLocalImportTab("single");
+    if (el.localPathInput) {
+      el.localPathInput.value = dropped;
+    }
+    localBatchImportContext = null;
+    updateLocalImportButtonState();
+    log(`已填入单技能导入路径：${dropped}`);
+  };
+
+  document.addEventListener("dragenter", onDragEnter);
+  document.addEventListener("dragover", onDragOver);
+  document.addEventListener("dragleave", onDragLeave);
+  document.addEventListener("drop", onDrop);
 }
 
 function submitLocalRepoScanForm() {
@@ -2078,9 +2696,9 @@ async function onRepoScanSubmit(event) {
   const form = event.currentTarget;
   const button = form.querySelector("button[type=submit]");
   const done = setBusy(button, "下载并扫描中...");
+  const payload = Object.fromEntries(new FormData(form).entries());
 
   try {
-    const payload = Object.fromEntries(new FormData(form).entries());
     payload.rulesCanonicalValidation = Boolean(el.repoRulesCanonical && el.repoRulesCanonical.checked);
     const result = await api("/api/repo/scan", {
       method: "POST",
@@ -2089,8 +2707,10 @@ async function onRepoScanSubmit(event) {
     applyRepoScanResult(result.result, "GitLab 下载并扫描");
     log(`仓库扫描完成：${repoScanState.candidates.length} 项，已默认全选可选项（docs 如存在为必选）`);
   } catch (error) {
-    log(`仓库扫描失败：${getErrorMessage(error)}`);
-    el.repoScanMeta.textContent = `扫描失败：${getErrorMessage(error)}`;
+    const message = getErrorMessage(error);
+    log(`仓库扫描失败：${message}`);
+    el.repoScanMeta.textContent = `扫描失败：${message}`;
+    await fallbackRepoScanByTerminalClone(payload, message);
     repoScanState = {
       repoPath: "",
       repoId: "",
@@ -2282,6 +2902,7 @@ async function onPickLocalRepoDirectory() {
     if (!selected) {
       return;
     }
+    setResourceImportTab("local");
     activateLocalImportTab("repo");
     if (el.localRepoPathInput) {
       el.localRepoPathInput.value = selected;
@@ -2536,7 +3157,6 @@ async function onLinkSubmitSingle() {
 
     const scopeLabel = currentLinkScopePath ? `项目 ${currentLinkScopePath}` : "全局";
     let successCount = 0;
-    let shouldLinkRules = false;
     const failed = [];
 
     for (const resourceToken of selectedResourceIds) {
@@ -2559,9 +3179,6 @@ async function onLinkSubmitSingle() {
           body: JSON.stringify(requestPayload),
         });
         logLinkResult(result.result, scopeLabel);
-        if (!result.result || result.result.mode !== "rules-batch") {
-          shouldLinkRules = true;
-        }
         successCount += 1;
       } catch (error) {
         const message = getErrorMessage(error);
@@ -2572,9 +3189,6 @@ async function onLinkSubmitSingle() {
 
     if (selectedResourceIds.length > 1) {
       log(`多选链接完成（${scopeLabel}）：成功 ${successCount}，失败 ${failed.length}`);
-    }
-    if (toolId && shouldLinkRules && successCount > 0) {
-      await linkRulesByDefault(toolId, scopeLabel);
     }
     if (failed.length > 0 && successCount === 0) {
       log("多选链接未成功，请检查上方错误日志");
@@ -2888,6 +3502,48 @@ function bindEvents() {
     }
   });
 
+  if (el.terminalToggleBtn) {
+    el.terminalToggleBtn.addEventListener("click", async () => {
+      const nextOpen = !terminalOpen;
+      if (nextOpen) {
+        const started = await ensureTerminalStarted();
+        if (!started) {
+          return;
+        }
+      }
+      setTerminalOpen(nextOpen);
+    });
+  }
+  if (el.terminalCloseBtn) {
+    el.terminalCloseBtn.addEventListener("click", () => {
+      setTerminalOpen(false);
+    });
+  }
+  if (el.terminalInputForm) {
+    el.terminalInputForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!(el.terminalInput instanceof HTMLInputElement)) {
+        return;
+      }
+      const command = el.terminalInput.value;
+      if (!command.trim()) {
+        return;
+      }
+      const started = await ensureTerminalStarted();
+      if (!started) {
+        return;
+      }
+      try {
+        appendTerminalOutput(`$ ${command}\n`);
+        await window.cowhubDesktop.terminalWrite(`${command}\n`);
+      } catch (error) {
+        appendTerminalOutput(`[write error] ${getErrorMessage(error)}\n`);
+      } finally {
+        el.terminalInput.value = "";
+      }
+    });
+  }
+
   if (el.repoScanForm) {
     el.repoScanForm.addEventListener("submit", onRepoScanSubmit);
     el.repoScanForm.addEventListener("input", updateRepoScanButtonState);
@@ -2967,17 +3623,17 @@ function bindEvents() {
       onClearLinkScopeDirectory();
     });
   }
-  if (el.conflictTypeFilter) {
-    el.conflictTypeFilter.addEventListener("change", (event) => {
+  if (el.conflictTypeTabs) {
+    el.conflictTypeTabs.addEventListener("click", (event) => {
       const target = event.target;
-      selectedConflictType = target instanceof HTMLSelectElement ? target.value : "all";
-      renderConflictModule();
-    });
-  }
-  if (el.conflictSearchInput) {
-    el.conflictSearchInput.addEventListener("input", (event) => {
-      const target = event.target;
-      selectedConflictSearch = target instanceof HTMLInputElement ? target.value : "";
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const tab = target.closest("[data-conflict-type]");
+      if (!tab || !el.conflictTypeTabs.contains(tab)) {
+        return;
+      }
+      selectedConflictType = tab.getAttribute("data-conflict-type") || "all";
       renderConflictModule();
     });
   }
@@ -3082,11 +3738,73 @@ function bindEvents() {
   if (el.linkAllModeToggle) {
     el.linkAllModeToggle.addEventListener("change", syncLinkModeUI);
   }
+  if (el.resourceImportTabs) {
+    el.resourceImportTabs.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const btn = target.closest("[data-resource-import-tab]");
+      if (!btn || !el.resourceImportTabs.contains(btn)) {
+        return;
+      }
+      const tab = btn.getAttribute("data-resource-import-tab") || "gitlab";
+      setResourceImportTab(tab);
+    });
+  }
+  if (el.moduleNav) {
+    el.moduleNav.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const btn = target.closest("[data-module-target]");
+      if (!btn || !el.moduleNav.contains(btn)) {
+        return;
+      }
+      const moduleKey = btn.getAttribute("data-module-target") || "overview";
+      setActiveModule(moduleKey);
+    });
+  }
+  window.addEventListener("resize", () => {
+    updateModuleNavIndicator();
+  });
   el.pathSetForm.addEventListener("submit", onPathSet);
   el.pathSetForm.addEventListener("input", updatePathSetButtonsState);
   el.pathSetForm.addEventListener("change", updatePathSetButtonsState);
   el.pathUnsetBtn.addEventListener("click", onPathUnset);
   el.rollbackBtn.addEventListener("click", onRollback);
+  if (el.logDock) {
+    el.logDock.addEventListener("click", () => {
+      toggleLogDrawer();
+    });
+  }
+  if (el.logDrawerCloseBtn) {
+    el.logDrawerCloseBtn.addEventListener("click", () => {
+      setLogDrawerExpanded(false);
+    });
+  }
+  if (el.logDrawerBackdrop) {
+    el.logDrawerBackdrop.addEventListener("click", () => {
+      setLogDrawerExpanded(false);
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    if (terminalOpen) {
+      setTerminalOpen(false);
+      return;
+    }
+    if (isRepoHistoryOverlayVisible()) {
+      closeRepoHistoryOverlay();
+      return;
+    }
+    if (logDrawerExpanded) {
+      setLogDrawerExpanded(false);
+    }
+  });
   if (el.operationRecords) {
     el.operationRecords.addEventListener("click", (event) => {
       const target = event.target;
@@ -3108,6 +3826,17 @@ function bindEvents() {
       if (!(target instanceof Element)) {
         return;
       }
+      const tab = target.closest("[data-hub-type]");
+      if (tab && el.toolScanList.contains(tab)) {
+        const nextType = tab.getAttribute("data-hub-type") || "skills";
+        if (nextType !== activeHubType) {
+          activeHubType = nextType;
+          if (currentOverview && currentOverview.state) {
+            renderHubStoreResources(currentOverview.state.resources || []);
+          }
+        }
+        return;
+      }
       const btn = target.closest(".hub-delete-btn");
       if (!btn || !el.toolScanList.contains(btn)) {
         return;
@@ -3118,12 +3847,50 @@ function bindEvents() {
       onRemoveHubResource(resourceId, resourceType, resourceName);
     });
   }
-  el.toolBrowserSelect.addEventListener("change", () => {
-    renderToolBrowser();
-  });
-  el.toolBrowserTypeSelect.addEventListener("change", () => {
-    renderToolBrowser();
-  });
+  if (el.toolBrowserSelect) {
+    el.toolBrowserSelect.addEventListener("change", () => {
+      renderToolBrowser();
+    });
+  }
+  if (el.toolBrowserTypeSelect) {
+    el.toolBrowserTypeSelect.addEventListener("change", () => {
+      renderToolBrowser();
+    });
+  }
+  if (el.toolBrowserToolTabs && el.toolBrowserSelect) {
+    el.toolBrowserToolTabs.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const btn = target.closest("[data-tool-id]");
+      if (!btn || !el.toolBrowserToolTabs.contains(btn)) {
+        return;
+      }
+      const next = btn.getAttribute("data-tool-id") || "cursor";
+      if ("value" in el.toolBrowserSelect) {
+        el.toolBrowserSelect.value = next;
+      }
+      renderToolBrowser();
+    });
+  }
+  if (el.toolBrowserTypeTabs && el.toolBrowserTypeSelect) {
+    el.toolBrowserTypeTabs.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const btn = target.closest("[data-type-id]");
+      if (!btn || !el.toolBrowserTypeTabs.contains(btn)) {
+        return;
+      }
+      const next = btn.getAttribute("data-type-id") || "skills";
+      if ("value" in el.toolBrowserTypeSelect) {
+        el.toolBrowserTypeSelect.value = next;
+      }
+      renderToolBrowser();
+    });
+  }
   el.toolBrowserContent.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) {
@@ -3153,6 +3920,8 @@ function bindEvents() {
         return;
       }
 
+      setActiveModule("resource-import");
+      setResourceImportTab("local");
       activateLocalImportTab("single");
       const form = el.localImportForm;
       const typeSelect = form.querySelector('select[name="type"]');
@@ -3191,6 +3960,8 @@ function bindEvents() {
       return;
     }
 
+    setActiveModule("resource-import");
+    setResourceImportTab("local");
     activateLocalImportTab("single");
     const form = el.localImportForm;
     const typeSelect = form.querySelector('select[name="type"]');
@@ -3218,6 +3989,9 @@ function bindEvents() {
 async function boot() {
   repoHistoryEntries = loadRepoHistoryEntries();
   docsWritebackProjectPath = loadDocsWritebackProjectPath();
+  setLatestLogPreview("暂无日志");
+  setLogDrawerExpanded(false);
+  setTerminalOpen(false);
   const serverSavedPath = await loadDocsWritebackProjectPathFromServer();
   if (serverSavedPath) {
     docsWritebackProjectPath = serverSavedPath;
@@ -3229,10 +4003,9 @@ async function boot() {
   syncDocsWritebackAutoTimer();
   renderDocsWritebackModule();
   activateLocalImportTab("single");
+  setResourceImportTab(activeResourceImportTab);
   bindEvents();
-  if (el.conflictTypeFilter) {
-    el.conflictTypeFilter.value = selectedConflictType;
-  }
+  setActiveModule(activeModule, false);
   syncLinkModeUI();
   updateActionButtonsState();
   if (docsWritebackProjectPath) {

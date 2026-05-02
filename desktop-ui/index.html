@@ -16,20 +16,26 @@
     <div class="bg-orb orb-a" aria-hidden="true"></div>
     <div class="bg-orb orb-b" aria-hidden="true"></div>
 
-    <header class="hero">
-      <div>
-        <h1>SnakeHub可视化控制台</h1>
-        <p class="subtitle">
-          统一查看扫描结果、导入资源、合并候选和链接状态，覆盖 Claude、Cursor、Codex。
-        </p>
-      </div>
-      <div class="hero-actions">
-        <button id="refreshBtn" class="btn btn-strong">立即扫描并刷新</button>
-      </div>
-    </header>
+    <main class="workspace">
+      <aside class="module-sidebar">
+        <div class="module-sidebar-title">功能模块</div>
+        <div id="moduleNav" class="module-nav" role="tablist" aria-label="功能模块导航">
+          <span id="moduleNavIndicator" class="module-nav-indicator" aria-hidden="true"></span>
+          <button class="module-nav-btn active" type="button" role="tab" aria-selected="true" data-module-target="overview">扫描总览</button>
+          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="browser">工具目录浏览器</button>
+          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="resource-import">资源导入</button>
+          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="link">链接资源</button>
+          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="path">路径覆盖</button>
+          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="conflict">冲突检查</button>
+          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="docs">Docs回写</button>
+        </div>
+        <div class="module-sidebar-footer">
+          <button id="refreshBtn" class="btn btn-strong">立即扫描并刷新</button>
+        </div>
+      </aside>
 
-    <main class="layout">
-      <section id="wizardPanel" class="panel wizard hidden">
+      <section class="module-stage">
+      <section id="wizardPanel" class="panel wizard hidden module-panel active" data-module="overview">
         <h2>首次向导</h2>
         <ol>
           <li><strong>扫描：</strong>检测已安装 AI 工具和现有资源。</li>
@@ -39,155 +45,164 @@
         <p id="wizardHint"></p>
       </section>
 
-      <section class="panel">
+      <section id="overviewPanel" class="panel module-panel active" data-module="overview">
         <div class="panel-head">
-          <h2>扫描总览</h2>
           <span id="summaryBadge" class="badge">加载中...</span>
         </div>
         <div id="overviewCards" class="cards"></div>
         <div id="toolScanList" class="tool-list"></div>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>工具目录浏览器</h2>
-          <div class="row">
-            <label>项目目录（可选，点击输入框选择）
-              <span class="path-picker">
-                <input id="toolScopePath" placeholder="未选择（默认全局）" readonly />
-                <button class="path-clear-btn" id="toolScopeClearBtn" type="button" aria-label="清空项目目录">✕</button>
-              </span>
-            </label>
-            <label>当前工具
-              <select id="toolBrowserSelect">
-                <option value="cursor">cursor</option>
-                <option value="claude">claude</option>
-                <option value="codex">codex</option>
-                <option value="opencow">opencow</option>
-              </select>
-            </label>
-            <label>仅看某一类
-              <select id="toolBrowserTypeSelect">
-                <option value="skills" selected>skills</option>
-                <option value="hooks">hooks</option>
-                <option value="rules">rules</option>
-                <option value="agents">agents</option>
-                <option value="commands">commands</option>
-              </select>
-            </label>
+      <section id="toolBrowserPanel" class="panel module-panel" data-module="browser">
+        <div class="tool-browser-controls">
+          <div class="scope-select-wrap compact">
+            <button id="toolScopePath" class="scope-select-btn" type="button">点击选择项目目录，未选则展示全局技能</button>
+            <button class="scope-clear-btn" id="toolScopeClearBtn" type="button" aria-label="清空项目目录">✕</button>
+          </div>
+          <input id="toolBrowserSelect" type="hidden" value="cursor" />
+          <input id="toolBrowserTypeSelect" type="hidden" value="skills" />
+          <div class="browser-tab-row">
+            <div id="toolBrowserTypeTabs" class="tool-tabs browser-top-tabs" role="tablist" aria-label="仅看某一类">
+              <button class="tool-tab active" type="button" data-type-id="skills">skills</button>
+              <button class="tool-tab" type="button" data-type-id="hooks">hooks</button>
+              <button class="tool-tab" type="button" data-type-id="rules">rules</button>
+              <button class="tool-tab" type="button" data-type-id="agents">agents</button>
+              <button class="tool-tab" type="button" data-type-id="commands">commands</button>
+            </div>
+            <div id="toolBrowserToolTabs" class="tool-tabs browser-tool-switch" role="tablist" aria-label="当前工具">
+              <button class="tool-tab active" type="button" data-tool-id="cursor">cursor</button>
+              <button class="tool-tab" type="button" data-tool-id="claude">claude</button>
+              <button class="tool-tab" type="button" data-tool-id="codex">codex</button>
+              <button class="tool-tab" type="button" data-tool-id="opencow">opencow</button>
+            </div>
           </div>
         </div>
         <div id="toolBrowserMeta" class="tool-meta"></div>
         <div id="toolBrowserContent" class="tool-browser-grid"></div>
       </section>
 
-      <section id="repoPanel" class="panel repo-panel">
-        <div class="panel-head">
-          <h2>GitLab 下载并导入中心仓库（内部）</h2>
-          <button id="repoHistoryBadge" class="repo-history-badge" type="button">
-            扫描项目：<span id="repoHistoryCount">0</span>
-          </button>
-        </div>
-        <form id="repoScanForm" class="stack">
-          <label class="inline"><input id="repoRulesCanonical" name="rulesCanonicalValidation" type="checkbox" checked /> rules范式校验(有rules且需要链接至多工具平台时建议开启)</label>
-          <label class="inline"><input id="repoMultiToolset" name="multiToolset" type="checkbox" checked /> 多端工具集</label>
-          <label>GitLab 地址（或本地 git 仓库路径）
-            <input name="repoUrl" placeholder="https://gitlab.com/group/repo.git" required />
-          </label>
-          <label>分支/Tag/Commit（可选）
-            <input name="ref" placeholder="main / release / commit" />
-          </label>
-          <label>下载目录（可选）
-            <span class="path-picker">
-              <input id="repoTargetPath" name="targetPath" placeholder="未选择（将使用默认受管目录）" readonly />
-              <button class="path-clear-btn" id="repoClearDirBtn" type="button" aria-label="清空下载目录">✕</button>
-            </span>
-          </label>
-          <div class="hint-line">
-            如果不选择，将下载到固定受管目录：<span class="mono">~/.snakehub/repos/&lt;repo-id&gt;</span>
+      <section id="resourceImportPanel" class="panel module-panel" data-module="resource-import">
+        <div class="panel-head panel-head-wrap resource-import-head">
+          <div class="resource-import-scan-row">
+            <button id="repoHistoryBadge" class="repo-history-badge" type="button">
+              扫描项目：<span id="repoHistoryCount">0</span>
+            </button>
           </div>
-          <button class="btn btn-strong" type="submit">下载并扫描</button>
-        </form>
-
-      </section>
-
-      <section id="localImportPanel" class="panel">
-        <div class="panel-head panel-head-wrap">
-          <h2>从本地路径导入</h2>
-          <div id="localImportTabs" class="import-tabs" role="tablist" aria-label="本地导入模式">
-            <button id="localSingleTabBtn" class="tool-tab active" type="button" role="tab" aria-selected="true" data-tab="single">单技能导入</button>
-            <button id="localRepoTabBtn" class="tool-tab" type="button" role="tab" aria-selected="false" data-tab="repo">技能仓库导入</button>
+          <div class="resource-import-meta-row">
+            <div class="resource-import-title-row">
+              <span id="resourceImportCurrentTitle" class="resource-import-current-title">从GitLab下载并导入中心仓库（内部）</span>
+              <button id="terminalToggleBtn" class="terminal-toggle-btn" type="button" aria-label="切换终端面板" title="切换终端面板">🖥</button>
+            </div>
+            <div class="resource-import-tab-row">
+              <div id="resourceImportTabs" class="tool-tabs browser-tool-switch" role="tablist" aria-label="资源导入模块切换">
+                <button id="resourceImportGitlabTabBtn" class="tool-tab active" type="button" role="tab" aria-selected="true" data-resource-import-tab="gitlab">GitLab</button>
+                <button id="resourceImportLocalTabBtn" class="tool-tab" type="button" role="tab" aria-selected="false" data-resource-import-tab="local">本地路径</button>
+                <button id="resourceImportGithubTabBtn" class="tool-tab" type="button" role="tab" aria-selected="false" data-resource-import-tab="github">GitHub</button>
+              </div>
+            </div>
           </div>
         </div>
-        <div id="localSingleImportPane" class="local-import-pane active" role="tabpanel" aria-labelledby="localSingleTabBtn">
-          <form id="localImportForm" class="stack">
-            <label>类型
-              <select name="type">
-                <option value="skill">skill</option>
-                <option value="hook">hook</option>
-                <option value="agent">agent</option>
-                <option value="command">command</option>
-                <option value="rule">rule</option>
-              </select>
-            </label>
-            <label>路径 <input id="localPathInput" name="sourcePath" placeholder="~/Downloads/skill-folder" required /></label>
-            <label>名称（可选） <input name="name" placeholder="留空则自动推断" /></label>
-            <button class="btn btn-strong" type="submit">导入本地资源</button>
-          </form>
-          <div id="localDropZone" class="drop-zone">可将系统中文件夹路径拖拽到这里（会自动填入路径）</div>
+
+        <div id="resourceImportGitlabPane" class="resource-import-pane active" data-resource-import-pane="gitlab">
+          <section id="repoPanel" class="repo-panel resource-import-subpanel">
+            <form id="repoScanForm" class="stack">
+              <label class="inline"><input id="repoRulesCanonical" name="rulesCanonicalValidation" type="checkbox" checked /> rules范式校验(有rules且需要链接至多工具平台时建议开启)</label>
+              <label class="inline"><input id="repoMultiToolset" name="multiToolset" type="checkbox" checked /> 多端工具集</label>
+              <label>GitLab 地址（或本地 git 仓库路径）
+                <input name="repoUrl" placeholder="https://gitlab.com/group/repo.git" required />
+              </label>
+              <label>分支/Tag/Commit（可选）
+                <input name="ref" placeholder="main / release / commit" />
+              </label>
+              <label>下载目录（可选）
+                <span class="path-picker">
+                  <input id="repoTargetPath" name="targetPath" placeholder="未选择（将使用默认受管目录）" readonly />
+                  <button class="path-clear-btn" id="repoClearDirBtn" type="button" aria-label="清空下载目录">✕</button>
+                </span>
+              </label>
+              <div class="hint-line">
+                如果不选择，将下载到固定受管目录：<span class="mono">~/.snakehub/repos/&lt;repo-id&gt;</span>
+              </div>
+              <button class="btn btn-strong" type="submit">下载并扫描</button>
+            </form>
+          </section>
         </div>
-        <div id="localRepoImportPane" class="local-import-pane" role="tabpanel" aria-labelledby="localRepoTabBtn" hidden>
-          <form id="localRepoScanForm" class="stack">
-            <label class="inline"><input id="localRepoRulesCanonical" name="rulesCanonicalValidation" type="checkbox" checked /> rules范式校验(有rules且需要链接至多工具平台时建议开启)</label>
-            <label class="inline"><input id="localRepoMultiToolset" name="multiToolset" type="checkbox" checked /> 多端工具集</label>
-            <label>技能仓库路径
-              <span class="path-picker">
-                <input id="localRepoPathInput" name="repoPath" placeholder="点击选择技能仓库目录" readonly required />
-                <button class="path-clear-btn" id="localRepoClearDirBtn" type="button" aria-label="清空技能仓库路径">✕</button>
-              </span>
-            </label>
-            <div class="hint-line">目录结构需包含可扫描资源（如 skills / commands / hooks / rules / agents / docs）。</div>
-            <button class="btn btn-strong" type="submit">扫描并选择导入项</button>
-          </form>
-          <div id="localRepoDropZone" class="drop-zone">可将技能仓库目录拖拽到这里（会自动填入路径）</div>
+
+        <div id="resourceImportLocalPane" class="resource-import-pane" data-resource-import-pane="local" hidden>
+          <section id="localImportPanel" class="resource-import-subpanel">
+            <div class="panel-head panel-head-wrap">
+              <div id="localImportTabs" class="import-tabs" role="tablist" aria-label="本地导入模式">
+                <button id="localSingleTabBtn" class="tool-tab active" type="button" role="tab" aria-selected="true" data-tab="single">单技能导入</button>
+                <button id="localRepoTabBtn" class="tool-tab" type="button" role="tab" aria-selected="false" data-tab="repo">技能仓库导入</button>
+              </div>
+            </div>
+            <div id="localSingleImportPane" class="local-import-pane active" role="tabpanel" aria-labelledby="localSingleTabBtn">
+              <form id="localImportForm" class="stack">
+                <label>类型
+                  <select name="type">
+                    <option value="skill">skill</option>
+                    <option value="hook">hook</option>
+                    <option value="agent">agent</option>
+                    <option value="command">command</option>
+                    <option value="rule">rule</option>
+                  </select>
+                </label>
+                <label>路径 <input id="localPathInput" name="sourcePath" placeholder="~/Downloads/skill-folder" required /></label>
+                <label>名称（可选） <input name="name" placeholder="留空则自动推断" /></label>
+                <button class="btn btn-strong" type="submit">导入本地资源</button>
+              </form>
+            </div>
+            <div id="localRepoImportPane" class="local-import-pane" role="tabpanel" aria-labelledby="localRepoTabBtn" hidden>
+              <form id="localRepoScanForm" class="stack">
+                <label class="inline"><input id="localRepoRulesCanonical" name="rulesCanonicalValidation" type="checkbox" checked /> rules范式校验(有rules且需要链接至多工具平台时建议开启)</label>
+                <label class="inline"><input id="localRepoMultiToolset" name="multiToolset" type="checkbox" checked /> 多端工具集</label>
+                <label>技能仓库路径
+                  <span class="path-picker">
+                    <input id="localRepoPathInput" name="repoPath" placeholder="点击选择技能仓库目录" readonly required />
+                    <button class="path-clear-btn" id="localRepoClearDirBtn" type="button" aria-label="清空技能仓库路径">✕</button>
+                  </span>
+                </label>
+                <div class="hint-line">目录结构需包含可扫描资源（如 skills / commands / hooks / rules / agents / docs）。</div>
+                <button class="btn btn-strong" type="submit">扫描并选择导入项</button>
+              </form>
+              <div id="localRepoDropZone" class="drop-zone">可将技能仓库目录拖拽到这里（会自动填入路径）</div>
+            </div>
+          </section>
+        </div>
+
+        <div id="resourceImportGithubPane" class="resource-import-pane" data-resource-import-pane="github" hidden>
+          <section id="githubImportPanel" class="resource-import-subpanel">
+            <form id="gitForm" class="stack">
+              <label>类型
+                <select name="type">
+                  <option value="skill">skill</option>
+                  <option value="hook">hook</option>
+                  <option value="agent">agent</option>
+                  <option value="command">command</option>
+                  <option value="rule">rule</option>
+                </select>
+              </label>
+              <label>仓库地址/路径 <input name="repoUrl" placeholder="https://github.com/org/repo 或 /local/repo" required /></label>
+              <label>Ref（可选） <input name="ref" placeholder="main / tag / commit" /></label>
+              <label>选择子路径（可选） <input name="select" placeholder="skills/writing" /></label>
+              <label class="inline"><input name="all" type="checkbox" /> 导入全部候选</label>
+              <label>名称覆盖（可选） <input name="name" placeholder="导入时统一命名" /></label>
+              <div class="row github-actions-row">
+                <button class="btn" id="gitListBtn" type="button">列出候选</button>
+                <button class="btn btn-strong" type="submit">执行导入</button>
+              </div>
+            </form>
+            <pre id="gitCandidates" class="box"></pre>
+          </section>
         </div>
       </section>
 
-      <section class="panel">
-        <h2>从 GitHub 仓库导入（外部）</h2>
-        <form id="gitForm" class="stack">
-          <label>类型
-            <select name="type">
-              <option value="skill">skill</option>
-              <option value="hook">hook</option>
-              <option value="agent">agent</option>
-              <option value="command">command</option>
-              <option value="rule">rule</option>
-            </select>
-          </label>
-          <label>仓库地址/路径 <input name="repoUrl" placeholder="https://github.com/org/repo 或 /local/repo" required /></label>
-          <label>Ref（可选） <input name="ref" placeholder="main / tag / commit" /></label>
-          <label>选择子路径（可选） <input name="select" placeholder="skills/writing" /></label>
-          <label class="inline"><input name="all" type="checkbox" /> 导入全部候选</label>
-          <label>名称覆盖（可选） <input name="name" placeholder="导入时统一命名" /></label>
-          <div class="row">
-            <button class="btn" id="gitListBtn" type="button">列出候选</button>
-            <button class="btn btn-strong" type="submit">执行导入</button>
-          </div>
-        </form>
-        <pre id="gitCandidates" class="box"></pre>
-      </section>
-
-      <section class="panel">
-        <h2>链接资源到工具</h2>
-        <div class="hint-line">当前链接范围：可在下方选择项目目录；不选则链接到全局目录。</div>
+      <section id="linkPanel" class="panel module-panel" data-module="link">
         <form id="linkForm" class="stack">
-          <label>项目目录（可选，点击输入框选择）
-            <span class="path-picker">
-              <input id="linkScopePath" placeholder="未选择（默认全局）" readonly />
-              <button class="path-clear-btn" id="linkScopeClearBtn" type="button" aria-label="清空链接项目目录">✕</button>
-            </span>
-          </label>
+          <div class="scope-select-wrap compact">
+            <button id="linkScopePath" class="scope-select-btn" type="button">点击选择项目目录，未选则展示全局技能</button>
+            <button class="scope-clear-btn" id="linkScopeClearBtn" type="button" aria-label="清空链接项目目录">✕</button>
+          </div>
           <label class="inline">
             <input id="linkAllModeToggle" type="checkbox" />
             链接所有（按类型）
@@ -215,8 +230,7 @@
         </form>
       </section>
 
-      <section class="panel">
-        <h2>工具路径覆盖</h2>
+      <section id="pathPanel" class="panel module-panel" data-module="path">
         <div id="pathTable" class="path-table"></div>
         <form id="pathSetForm" class="stack compact">
           <label>工具
@@ -244,39 +258,28 @@
         </form>
       </section>
 
-      <section id="conflictSection" class="panel">
+      <section id="conflictSection" class="panel module-panel" data-module="conflict">
         <div class="panel-head">
-          <h2>冲突工具展示</h2>
           <span id="conflictSummary" class="badge">待扫描</span>
         </div>
-        <div class="row">
-          <label>分类筛选
-            <select id="conflictTypeFilter">
-              <option value="all">全部</option>
-              <option value="skills">skills</option>
-              <option value="hooks">hooks</option>
-              <option value="rules">rules</option>
-              <option value="agents">agents</option>
-              <option value="commands">commands</option>
-            </select>
-          </label>
-          <label>名称搜索
-            <input id="conflictSearchInput" placeholder="按名字检索冲突项" />
-          </label>
+        <div id="conflictTypeTabs" class="tool-tabs" role="tablist" aria-label="冲突分类筛选">
+          <button class="tool-tab active" type="button" data-conflict-type="all">全部</button>
+          <button class="tool-tab" type="button" data-conflict-type="skills">skills</button>
+          <button class="tool-tab" type="button" data-conflict-type="hooks">hooks</button>
+          <button class="tool-tab" type="button" data-conflict-type="rules">rules</button>
+          <button class="tool-tab" type="button" data-conflict-type="agents">agents</button>
+          <button class="tool-tab" type="button" data-conflict-type="commands">commands</button>
         </div>
         <div id="conflictToolTabs" class="tool-tabs"></div>
         <div id="conflictList" class="conflict-list"></div>
         <div id="conflictDetail" class="conflict-detail"></div>
       </section>
 
-      <section id="docsWritebackSection" class="panel">
+      <section id="docsWritebackSection" class="panel module-panel" data-module="docs">
         <div class="panel-head">
-          <h2>docs文档回写</h2>
+          <span id="docsWritebackPathDisplay" class="badge mono">--</span>
           <span id="docsWritebackSummary" class="badge">未就绪</span>
         </div>
-        <label>项目地址
-          <input id="docsWritebackProjectPath" placeholder="请先使用仓库导入功能生成项目地址" readonly />
-        </label>
         <div class="row">
           <button id="docsDetectBtn" class="btn" type="button">检测 docs 改动</button>
           <button id="docsApplyBtn" class="btn btn-strong" type="button">文件同步</button>
@@ -284,17 +287,14 @@
         <div id="docsWritebackMeta" class="hint-line">仅在有项目地址时开启每6小时自动检测。</div>
         <div id="docsWritebackTree" class="docs-tree"></div>
       </section>
-
-      <section class="panel wide">
-        <div class="panel-head">
-          <h2>操作日志</h2>
-          <button id="rollbackBtn" class="btn">回滚最近一次链接</button>
+      <div id="resourceImportDropOverlay" class="resource-import-drop-overlay" aria-hidden="true">
+        <div class="resource-import-drop-content">
+          <div class="resource-import-drop-icon">📁</div>
+          <div>拖拽目录到此处，会自动解析</div>
         </div>
-        <div class="hint-line">点击下方“链接”记录可按该次操作回滚。</div>
-        <div id="operationRecords" class="operation-list"></div>
-        <div class="hint-line">页面日志（仅当前会话可见）：</div>
-        <pre id="eventLog" class="log-box"></pre>
+      </div>
       </section>
+
     </main>
 
     <div id="repoHistoryBackdrop" class="repo-history-backdrop" aria-hidden="true"></div>
@@ -311,6 +311,53 @@
       </div>
       <div id="repoCandidates" class="repo-candidates"></div>
     </div>
+
+    <div id="logDrawerBackdrop" class="log-drawer-backdrop" aria-hidden="true"></div>
+    <div id="logShelf" class="log-shelf">
+      <section id="logDrawer" class="log-drawer" aria-hidden="true" aria-label="操作日志抽屉">
+        <div class="log-drawer-head">
+          <h2>操作日志</h2>
+          <div class="row">
+            <button id="rollbackBtn" class="btn" type="button">回滚最近一次链接</button>
+            <button id="logDrawerCloseBtn" class="btn" type="button">收起</button>
+          </div>
+        </div>
+        <div class="log-drawer-body">
+          <div>
+            <div class="hint-line">点击下方“链接”记录可按该次操作回滚。</div>
+            <div id="operationRecords" class="operation-list"></div>
+          </div>
+          <div>
+            <div class="hint-line">页面日志（仅当前会话可见）：</div>
+            <pre id="eventLog" class="log-box"></pre>
+          </div>
+        </div>
+      </section>
+
+      <button
+        id="logDock"
+        class="log-dock"
+        type="button"
+        aria-expanded="false"
+        aria-controls="logDrawer"
+      >
+        <span class="log-dock-tag">最新日志</span>
+        <span id="latestLogPreview" class="log-dock-preview">暂无日志</span>
+        <span class="log-dock-icon" aria-hidden="true">⤢</span>
+      </button>
+    </div>
+
+    <section id="terminalPanel" class="terminal-panel" aria-hidden="true">
+      <div class="terminal-head">
+        <strong>本地终端</strong>
+        <button id="terminalCloseBtn" class="btn" type="button">收起</button>
+      </div>
+      <pre id="terminalOutput" class="terminal-output"></pre>
+      <form id="terminalInputForm" class="terminal-input-row">
+        <input id="terminalInput" placeholder="输入命令并回车执行（运行于当前电脑环境）" autocomplete="off" />
+        <button class="btn btn-strong" type="submit">执行</button>
+      </form>
+    </section>
 
     <script src="/app.js"></script>
   </body>
