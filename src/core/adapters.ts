@@ -14,6 +14,7 @@ function targetFor(base: string, type: ResourceType): string {
 const claudeBase = userHomePath(".claude");
 const cursorBase = userHomePath(".cursor");
 const codexBase = userHomePath(".codex");
+const opencowBase = userHomePath(".opencow");
 
 export const TOOL_ADAPTERS: ToolAdapter[] = [
   {
@@ -40,6 +41,14 @@ export const TOOL_ADAPTERS: ToolAdapter[] = [
     defaultEnabledTypes: ["skills", "commands", "rules"],
     detect: async () => pathExists(codexBase),
     targetDir: (type: ResourceType) => targetFor(codexBase, type),
+  },
+  {
+    id: "opencow",
+    name: "OpenCow",
+    configDirName: ".opencow",
+    supports: ["skills", "hooks", "agents", "commands", "rules"],
+    detect: async () => pathExists(opencowBase),
+    targetDir: (type: ResourceType) => path.join(opencowBase, "capabilities", type),
   },
 ];
 

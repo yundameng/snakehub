@@ -1,6 +1,6 @@
 export type ResourceType = "skills" | "hooks" | "agents" | "commands" | "rules";
 
-export type OperationType = "import" | "link" | "rollback";
+export type OperationType = "import" | "link" | "rollback" | "remove";
 
 export interface FingerprintFile {
   relativePath: string;

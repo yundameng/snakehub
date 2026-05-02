@@ -63,6 +63,7 @@
                 <option value="cursor">cursor</option>
                 <option value="claude">claude</option>
                 <option value="codex">codex</option>
+                <option value="opencow">opencow</option>
               </select>
             </label>
             <label>仅看某一类
@@ -145,7 +146,7 @@
                 <button class="path-clear-btn" id="localRepoClearDirBtn" type="button" aria-label="清空技能仓库路径">✕</button>
               </span>
             </label>
-            <div class="hint-line">目录结构需包含可扫描资源（如 skills / commands / hooks / rules / agents）。</div>
+            <div class="hint-line">目录结构需包含可扫描资源（如 skills / commands / hooks / rules / agents / docs）。</div>
             <button class="btn btn-strong" type="submit">扫描并选择导入项</button>
           </form>
           <div id="localRepoDropZone" class="drop-zone">可将技能仓库目录拖拽到这里（会自动填入路径）</div>
@@ -191,8 +192,8 @@
             <input id="linkAllModeToggle" type="checkbox" />
             链接所有（按类型）
           </label>
-          <label id="linkResourceRow">资源
-            <select id="resourceSelect" name="resourceToken" required></select>
+          <label id="linkResourceRow"><p>资源（可多选） <span id="linkRulesHint" class="warn-inline">rules规则默认会被链接</span></p>
+            <div id="resourceChecklist" class="resource-checklist" role="group" aria-label="资源多选列表"></div>
           </label>
           <div id="linkAllTypesRow" class="row" style="display: none">
             <label class="inline"><input type="checkbox" name="linkTypes" value="skills" checked /> skills</label>
@@ -206,6 +207,7 @@
               <option value="claude">claude</option>
               <option value="cursor">cursor</option>
               <option value="codex">codex</option>
+              <option value="opencow">opencow</option>
             </select>
           </label>
           <label>别名（可选） <input name="aliasName" placeholder="留空则使用资源名" /></label>
@@ -222,6 +224,7 @@
               <option value="claude">claude</option>
               <option value="cursor">cursor</option>
               <option value="codex">codex</option>
+              <option value="opencow">opencow</option>
             </select>
           </label>
           <label>类型
@@ -264,6 +267,22 @@
         <div id="conflictToolTabs" class="tool-tabs"></div>
         <div id="conflictList" class="conflict-list"></div>
         <div id="conflictDetail" class="conflict-detail"></div>
+      </section>
+
+      <section id="docsWritebackSection" class="panel">
+        <div class="panel-head">
+          <h2>docs文档回写</h2>
+          <span id="docsWritebackSummary" class="badge">未就绪</span>
+        </div>
+        <label>项目地址
+          <input id="docsWritebackProjectPath" placeholder="请先使用仓库导入功能生成项目地址" readonly />
+        </label>
+        <div class="row">
+          <button id="docsDetectBtn" class="btn" type="button">检测 docs 改动</button>
+          <button id="docsApplyBtn" class="btn btn-strong" type="button">文件同步</button>
+        </div>
+        <div id="docsWritebackMeta" class="hint-line">仅在有项目地址时开启每6小时自动检测。</div>
+        <div id="docsWritebackTree" class="docs-tree"></div>
       </section>
 
       <section class="panel wide">

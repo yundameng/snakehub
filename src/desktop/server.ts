@@ -7,12 +7,15 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { ensureHubLayout, getHubRoot, hubPaths } from "../core/config";
 import { detectProjectGlobalConflicts } from "../core/conflicts";
+import { loadDocsWritebackConfig, saveDocsWritebackConfig } from "../core/docs-writeback-config";
+import { applyDocsWritebackToProject, detectDocsWritebackChanges } from "../core/docs-writeback";
 import { importFromRepo, inspectRepoForImport } from "../core/git-import";
 import { archiveHooksWithConfig, resolveHooksConfigSibling } from "../core/hooks-config";
 import { importResource } from "../core/importer";
 import { linkResource, resolveResourceOrThrow } from "../core/linker";
 import { listState } from "../core/list";
 import { importRepoCandidatesToHub, scanRepoCandidates } from "../core/repo-sync";
+import { removeResourceFromHub } from "../core/remove-resource";
 import { normalizeResourceType } from "../core/resource-utils";
 import {
   archiveRulesWithCompanions,
@@ -23,7 +26,7 @@ import {
 import { rollbackLinkOperation } from "../core/rollback";
 import { scanTools } from "../core/scanner";
 import { getEffectiveToolPathEntries, resolveTargetDir, setToolPathOverride, unsetToolPathOverride } from "../core/tool-paths";
-import { ResourceType } from "../core/types";
+import { ResourceRecord, ResourceType } from "../core/types";
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.COWHUB_DESKTOP_PORT || "4987");
@@ -92,6 +95,222 @@ interface LocalBatchCandidate {
 }
 
 const RULE_FILE_SUFFIXES = new Set([".md", ".mdc", ".rules"]);
+const RULE_SUFFIX_BY_TOOL: Record<string, string> = {
+  claude: ".md",
+  cursor: ".mdc",
+  codex: ".rules",
+  opencow: ".md",
+};
+const RULE_TOOLSET_BUCKETS = ["api_tools", "vue_tools", "mini_tools"] as const;
+const PROJECT_SCAN_IGNORED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  "release",
+  ".idea",
+  ".vscode",
+]);
+type RuleToolsetBucket = (typeof RULE_TOOLSET_BUCKETS)[number];
+type DetectedProjectType = "php" | "vue" | "mini_program";
+
+function parseProjectTypeHint(value: unknown): DetectedProjectType | undefined {
+  const normalized = String(value || "").trim();
+  if (normalized === "php" || normalized === "vue" || normalized === "mini_program") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function expectedRuleExtensionForTool(toolId: string): string {
+  return RULE_SUFFIX_BY_TOOL[String(toolId || "").trim()] || "";
+}
+
+function normalizePathForMatch(value: string): string {
+  return String(value || "").trim().replaceAll("\\", "/").toLowerCase();
+}
+
+function ruleBucketFromText(value: string): RuleToolsetBucket | undefined {
+  const normalized = normalizePathForMatch(value);
+  const tagged = normalized.match(/\[(api_tools|vue_tools|mini_tools)\]/);
+  if (tagged && tagged[1]) {
+    return tagged[1] as RuleToolsetBucket;
+  }
+  for (const bucket of RULE_TOOLSET_BUCKETS) {
+    if (
+      normalized.includes(`/${bucket}/`) ||
+      normalized.includes(`-${bucket}`) ||
+      normalized.includes(`_${bucket}`) ||
+      normalized.endsWith(bucket)
+    ) {
+      return bucket;
+    }
+  }
+  return undefined;
+}
+
+function detectRuleBucket(resource: ResourceRecord): RuleToolsetBucket | undefined {
+  return (
+    ruleBucketFromText(resource.name) ||
+    ruleBucketFromText(resource.sourcePath) ||
+    ruleBucketFromText(resource.storePath)
+  );
+}
+
+function projectRuleBucket(projectType: DetectedProjectType): RuleToolsetBucket {
+  if (projectType === "php") {
+    return "api_tools";
+  }
+  if (projectType === "vue") {
+    return "vue_tools";
+  }
+  return "mini_tools";
+}
+
+async function isFile(targetPath: string): Promise<boolean> {
+  return fs
+    .stat(targetPath)
+    .then((item) => item.isFile())
+    .catch(() => false);
+}
+
+async function hasAnyNamedFile(baseDir: string, names: string[]): Promise<boolean> {
+  for (const name of names) {
+    if (await isFile(path.join(baseDir, name))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function hasFileWithExtensions(rootDir: string, exts: Set<string>, maxDepth = 4): Promise<boolean> {
+  async function walk(currentDir: string, depth: number): Promise<boolean> {
+    if (depth > maxDepth) {
+      return false;
+    }
+    const entries = await fs.readdir(currentDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+      const abs = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        if (PROJECT_SCAN_IGNORED_DIRS.has(entry.name)) {
+          continue;
+        }
+        if (await walk(abs, depth + 1)) {
+          return true;
+        }
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const ext = path.extname(entry.name).toLowerCase();
+      if (exts.has(ext)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return walk(path.resolve(rootDir), 0);
+}
+
+async function readPackageJson(projectPath: string): Promise<Record<string, unknown> | undefined> {
+  const packagePath = path.join(projectPath, "package.json");
+  if (!(await isFile(packagePath))) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(await fs.readFile(packagePath, "utf8")) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function packageHasAnyDependency(pkg: Record<string, unknown>, depNames: string[]): boolean {
+  const buckets = ["dependencies", "devDependencies", "peerDependencies"] as const;
+  for (const bucket of buckets) {
+    const section = pkg[bucket];
+    if (!section || typeof section !== "object") {
+      continue;
+    }
+    for (const name of depNames) {
+      if (Object.prototype.hasOwnProperty.call(section, name)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function detectProjectType(projectPath: string): Promise<DetectedProjectType | undefined> {
+  const root = path.resolve(projectPath);
+
+  const miniDetected = await hasAnyNamedFile(root, [
+    "project.config.json",
+    "project.private.config.json",
+    "miniprogram.config.json",
+  ]);
+  if (miniDetected) {
+    return "mini_program";
+  }
+
+  const pkg = await readPackageJson(root);
+  if (
+    pkg &&
+    packageHasAnyDependency(pkg, [
+      "vue",
+      "@vue/cli-service",
+      "@vitejs/plugin-vue",
+      "nuxt",
+      "nuxt3",
+      "@dcloudio/uni-app",
+    ])
+  ) {
+    return "vue";
+  }
+  if (
+    await hasAnyNamedFile(root, [
+      "vue.config.js",
+      "vite.config.js",
+      "vite.config.ts",
+      "vite.config.mjs",
+      "vite.config.cjs",
+    ])
+  ) {
+    return "vue";
+  }
+  if (await hasFileWithExtensions(root, new Set([".vue"]), 4)) {
+    return "vue";
+  }
+
+  if (await hasAnyNamedFile(root, ["composer.json"])) {
+    return "php";
+  }
+  if (await hasFileWithExtensions(root, new Set([".php"]), 4)) {
+    return "php";
+  }
+
+  return undefined;
+}
+
+function matchesRuleProjectAndTool(resource: ResourceRecord, input: {
+  toolId: string;
+  requiredBucket?: RuleToolsetBucket;
+}): boolean {
+  const expectedRuleExt = expectedRuleExtensionForTool(input.toolId);
+  if (expectedRuleExt && !String(resource.sourcePath || "").toLowerCase().endsWith(expectedRuleExt)) {
+    return false;
+  }
+
+  if (!input.requiredBucket) {
+    return true;
+  }
+  const bucket = detectRuleBucket(resource);
+  return !bucket || bucket === input.requiredBucket;
+}
 
 async function collectLocalBatchCandidates(type: ResourceType, sourceDir: string): Promise<LocalBatchCandidate[]> {
   const stat = await fs.stat(sourceDir);
@@ -161,8 +380,14 @@ function hooksRootFromSourcePath(sourcePath: string): string {
   return path.basename(resolved) === "hooks" ? resolved : path.dirname(resolved);
 }
 
-function expectedHooksConfigFileName(toolId: string): "settings.json" | "hooks.json" {
-  return toolId === "claude" ? "settings.json" : "hooks.json";
+function expectedHooksConfigFileName(toolId: string): "settings.json" | "hooks.json" | undefined {
+  if (toolId === "claude") {
+    return "settings.json";
+  }
+  if (toolId === "cursor" || toolId === "codex") {
+    return "hooks.json";
+  }
+  return undefined;
 }
 
 function resolveLinkedTarget(linkPath: string, rawTarget: string): string {
@@ -207,9 +432,12 @@ async function linkHooksConfigFile(input: {
   projectPath?: string;
   hooksSourceRoot: string;
   root?: string;
-}): Promise<{ configPath: string; backupPath?: string; alreadyLinked: boolean }> {
+}): Promise<{ configPath: string; backupPath?: string; alreadyLinked: boolean } | undefined> {
   const root = input.root ?? getHubRoot();
   const expectedConfigName = expectedHooksConfigFileName(input.toolId);
+  if (!expectedConfigName) {
+    return undefined;
+  }
   const sourceConfigPath = path.join(path.dirname(input.hooksSourceRoot), expectedConfigName);
   const sourceExists = await fs
     .stat(sourceConfigPath)
@@ -246,7 +474,7 @@ async function linkHooksGroup(input: {
   linked: number;
   alreadyLinked: number;
   failed: Array<{ resourceId: string; name: string; error: string }>;
-  config: { path: string; backupPath?: string; alreadyLinked: boolean };
+  config?: { path: string; backupPath?: string; alreadyLinked: boolean };
 }> {
   const root = input.root ?? getHubRoot();
   const state = await listState();
@@ -264,7 +492,7 @@ async function linkHooksGroup(input: {
     throw new Error(`No hooks resources found from source '${hooksSourceRoot}'.`);
   }
 
-  const config = await linkHooksConfigFile({
+  const linkedConfig = await linkHooksConfigFile({
     toolId: input.toolId,
     projectPath: input.projectPath,
     hooksSourceRoot,
@@ -304,11 +532,13 @@ async function linkHooksGroup(input: {
     linked,
     alreadyLinked,
     failed,
-    config: {
-      path: config.configPath,
-      backupPath: config.backupPath,
-      alreadyLinked: config.alreadyLinked,
-    },
+    config: linkedConfig
+      ? {
+          path: linkedConfig.configPath,
+          backupPath: linkedConfig.backupPath,
+          alreadyLinked: linkedConfig.alreadyLinked,
+        }
+      : undefined,
   };
 }
 
@@ -363,6 +593,7 @@ async function linkRulesGroup(input: {
   resourceToken: string;
   toolId: string;
   projectPath?: string;
+  projectTypeHint?: string;
   root?: string;
 }): Promise<{
   mode: "rules-batch";
@@ -380,12 +611,33 @@ async function linkRulesGroup(input: {
     throw new Error("Selected resource is not a rules resource.");
   }
 
+  let requiredBucket: RuleToolsetBucket | undefined;
+  let detectedProjectType: DetectedProjectType | undefined;
+  if (input.projectPath && input.projectPath.trim()) {
+    detectedProjectType = parseProjectTypeHint(input.projectTypeHint) || (await detectProjectType(input.projectPath));
+    if (!detectedProjectType) {
+      throw new Error("Unable to detect project type. Supported: php, vue, mini program.");
+    }
+    requiredBucket = projectRuleBucket(detectedProjectType);
+  }
+
   const rulesSourceRoot = rulesRootFromSourcePath(selected.sourcePath);
   const candidates = state.resources
     .filter((resource) => resource.type === "rules" && rulesRootFromSourcePath(resource.sourcePath) === rulesSourceRoot)
+    .filter((resource) =>
+      matchesRuleProjectAndTool(resource, {
+        toolId: input.toolId,
+        requiredBucket,
+      }),
+    )
     .sort((a, b) => `${a.name}/${a.id}`.localeCompare(`${b.name}/${b.id}`));
 
   if (candidates.length === 0) {
+    if (requiredBucket) {
+      throw new Error(
+        `No rules resources found for project type '${detectedProjectType}' (bucket '${requiredBucket}') and tool '${input.toolId}'.`,
+      );
+    }
     throw new Error(`No rules resources found from source '${rulesSourceRoot}'.`);
   }
 
@@ -517,6 +769,23 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   if (method === "GET" && urlPath === "/api/overview") {
     const [state, scan, paths] = await Promise.all([listState(), scanTools(), getEffectiveToolPathEntries()]);
     jsonResponse(res, 200, { ok: true, state, scan, paths });
+    return;
+  }
+
+  if (method === "GET" && urlPath === "/api/docs-writeback/config") {
+    const rootPath = getHubRoot();
+    const result = await loadDocsWritebackConfig(rootPath);
+    jsonResponse(res, 200, { ok: true, result });
+    return;
+  }
+
+  if (method === "POST" && urlPath === "/api/docs-writeback/config") {
+    const body = await readJsonBody(req);
+    const projectPathRaw = String(body.projectPath ?? "").trim();
+    const projectPath = projectPathRaw ? normalizeLocalPath(projectPathRaw) : "";
+    const rootPath = getHubRoot();
+    const result = await saveDocsWritebackConfig({ projectPath }, rootPath);
+    jsonResponse(res, 200, { ok: true, result });
     return;
   }
 
@@ -723,6 +992,41 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     return;
   }
 
+  if (method === "POST" && urlPath === "/api/docs-writeback/detect") {
+    const body = await readJsonBody(req);
+    const projectPathRaw = String(body.projectPath ?? "").trim();
+    if (!projectPathRaw) {
+      throw new Error("projectPath is required.");
+    }
+    const projectPath = normalizeLocalPath(projectPathRaw);
+    const rootPath = getHubRoot();
+    const detection = await detectDocsWritebackChanges({
+      projectPath,
+      rootPath,
+    });
+    jsonResponse(res, 200, {
+      ok: true,
+      result: detection,
+    });
+    return;
+  }
+
+  if (method === "POST" && urlPath === "/api/docs-writeback/apply") {
+    const body = await readJsonBody(req);
+    const projectPathRaw = String(body.projectPath ?? "").trim();
+    if (!projectPathRaw) {
+      throw new Error("projectPath is required.");
+    }
+    const projectPath = normalizeLocalPath(projectPathRaw);
+    const rootPath = getHubRoot();
+    const result = await applyDocsWritebackToProject({
+      projectPath,
+      rootPath,
+    });
+    jsonResponse(res, 200, { ok: true, result });
+    return;
+  }
+
   if (method === "POST" && urlPath === "/api/import/manual") {
     const body = await readJsonBody(req);
     const type = normalizeResourceType(String(body.type ?? ""));
@@ -789,12 +1093,34 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     return;
   }
 
+  if (method === "POST" && urlPath === "/api/project/detect-type") {
+    const body = await readJsonBody(req);
+    const projectPathRaw = String(body.projectPath ?? "").trim();
+    if (!projectPathRaw) {
+      throw new Error("projectPath is required.");
+    }
+    const projectPath = normalizeLocalPath(projectPathRaw);
+    const projectType = await detectProjectType(projectPath);
+    const rulesBucket = projectType ? projectRuleBucket(projectType) : undefined;
+    jsonResponse(res, 200, {
+      ok: true,
+      result: {
+        projectPath,
+        detected: Boolean(projectType),
+        projectType: projectType ?? null,
+        rulesBucket: rulesBucket ?? null,
+      },
+    });
+    return;
+  }
+
   if (method === "POST" && urlPath === "/api/link") {
     const body = await readJsonBody(req);
     const resourceToken = String(body.resourceToken ?? "").trim();
     const toolId = String(body.toolId ?? "").trim();
     const aliasName = body.aliasName ? String(body.aliasName) : undefined;
     const projectPath = body.projectPath ? normalizeLocalPath(String(body.projectPath)) : undefined;
+    const projectTypeHint = body.projectTypeHint ? String(body.projectTypeHint) : undefined;
 
     if (!resourceToken || !toolId) {
       throw new Error("resourceToken and toolId are required.");
@@ -814,7 +1140,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       if (aliasName && aliasName.trim()) {
         throw new Error("Rules linking is batch-only and does not support aliasName.");
       }
-      const result = await linkRulesGroup({ resourceToken, toolId, projectPath });
+      const result = await linkRulesGroup({ resourceToken, toolId, projectPath, projectTypeHint });
       jsonResponse(res, 200, { ok: true, result });
       return;
     }
@@ -852,12 +1178,21 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     }
     let rulesSourcePath = "";
     let rulesSourceRoot = "";
+    let rulesRequiredBucket: RuleToolsetBucket | undefined;
+    let detectedProjectType: DetectedProjectType | undefined;
+    const projectTypeHint = parseProjectTypeHint(body.projectTypeHint);
     if (includesRules) {
       rulesSourcePath = String(body.rulesSourcePath ?? "").trim();
-      if (!rulesSourcePath) {
-        throw new Error("rulesSourcePath is required when types include rules.");
+      if (rulesSourcePath) {
+        rulesSourceRoot = rulesRootFromSourcePath(normalizeLocalPath(rulesSourcePath));
       }
-      rulesSourceRoot = rulesRootFromSourcePath(normalizeLocalPath(rulesSourcePath));
+      if (projectPath && projectPath.trim()) {
+        detectedProjectType = projectTypeHint || (await detectProjectType(projectPath));
+        if (!detectedProjectType) {
+          throw new Error("Unable to detect project type. Supported: php, vue, mini program.");
+        }
+        rulesRequiredBucket = projectRuleBucket(detectedProjectType);
+      }
     }
 
     const candidates = state.resources
@@ -869,7 +1204,18 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
           return hooksRootFromSourcePath(resource.sourcePath) === hooksSourceRoot;
         }
         if (resource.type === "rules") {
-          return rulesRootFromSourcePath(resource.sourcePath) === rulesSourceRoot;
+          if (
+            !matchesRuleProjectAndTool(resource, {
+              toolId,
+              requiredBucket: rulesRequiredBucket,
+            })
+          ) {
+            return false;
+          }
+          if (rulesSourceRoot) {
+            return rulesRootFromSourcePath(resource.sourcePath) === rulesSourceRoot;
+          }
+          return true;
         }
         return true;
       })
@@ -881,7 +1227,15 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     }
     const ruleCandidates = includesRules ? candidates.filter((resource) => resource.type === "rules") : [];
     if (includesRules && ruleCandidates.length === 0) {
-      throw new Error(`No rules resources found from source '${rulesSourceRoot}'.`);
+      if (rulesSourceRoot) {
+        throw new Error(`No rules resources found from source '${rulesSourceRoot}'.`);
+      }
+      if (rulesRequiredBucket) {
+        throw new Error(
+          `No rules resources found for project type '${detectedProjectType}' (bucket '${rulesRequiredBucket}') and tool '${toolId}'.`,
+        );
+      }
+      throw new Error(`No rules resources found for tool '${toolId}'.`);
     }
 
     if (candidates.length === 0) {
@@ -922,18 +1276,39 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         projectPath,
         hooksSourceRoot,
       });
-      hooksConfig = {
-        path: linkedConfig.configPath,
-        backupPath: linkedConfig.backupPath,
-        alreadyLinked: linkedConfig.alreadyLinked,
-      };
+      if (linkedConfig) {
+        hooksConfig = {
+          path: linkedConfig.configPath,
+          backupPath: linkedConfig.backupPath,
+          alreadyLinked: linkedConfig.alreadyLinked,
+        };
+      }
     }
     if (includesRules) {
-      rulesCompanions = await linkRulesCompanionFiles({
-        toolId,
-        projectPath,
-        rulesSourceRoot,
-      });
+      if (rulesSourceRoot) {
+        rulesCompanions = await linkRulesCompanionFiles({
+          toolId,
+          projectPath,
+          rulesSourceRoot,
+        });
+      } else {
+        const ruleSourceRoots = [...new Set(ruleCandidates.map((resource) => rulesRootFromSourcePath(resource.sourcePath)))];
+        const linkedCompanions: Array<{
+          path: string;
+          name: string;
+          backupPath?: string;
+          alreadyLinked: boolean;
+        }> = [];
+        for (const sourceRoot of ruleSourceRoots) {
+          const linked = await linkRulesCompanionFiles({
+            toolId,
+            projectPath,
+            rulesSourceRoot: sourceRoot,
+          });
+          linkedCompanions.push(...linked);
+        }
+        rulesCompanions = linkedCompanions;
+      }
       if (rulesCompanions.length > 0) {
         rulesCompanionNotice =
           `检测到源地址有配置文件和规则文件：${rulesCompanions.map((item) => item.name).join(", ")}，将跟随rules一起链接`;
@@ -982,6 +1357,14 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const body = await readJsonBody(req);
     const operationId = body.operationId ? String(body.operationId) : undefined;
     const result = await rollbackLinkOperation({ operationId });
+    jsonResponse(res, 200, { ok: true, result });
+    return;
+  }
+
+  if (method === "POST" && urlPath === "/api/hub/remove-resource") {
+    const body = await readJsonBody(req);
+    const resourceToken = String(body.resourceToken ?? body.resourceId ?? "").trim();
+    const result = await removeResourceFromHub({ resourceToken });
     jsonResponse(res, 200, { ok: true, result });
     return;
   }

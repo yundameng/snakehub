@@ -9,7 +9,7 @@
   - 目录内容指纹（Merkle 风格，sha256）
   - 资源导入（目录/单文件）
   - 按内容去重（同类型 + 同指纹复用）
-  - 工具扫描（Claude / Cursor / Codex）
+  - 工具扫描（Claude / Cursor / Codex / OpenCow）
   - 链接分发（symlink；Windows 下使用 junction）
   - 链接回滚（恢复备份）
 - 仓库导入
@@ -68,10 +68,12 @@ snakehub paths
 snakehub paths set --tool codex --type hook --path ~/.codex/hooks
 snakehub paths set --tool codex --type rule --path ~/.codex/rules
 snakehub paths set --tool codex --type command --path ~/.codex/commands
+snakehub paths set --tool opencow --type command --path ~/.opencow/capabilities/commands
 snakehub paths unset --tool codex --type hook
 
 # 链接与回滚
 snakehub link --resource <resource_id_or_name> --tool codex --as my-skill
+snakehub link --resource <resource_id_or_name> --tool opencow --as my-skill
 snakehub rollback
 ```
 
@@ -186,11 +188,14 @@ npm run dist:mac:dmg
 
 ## 适配器目录
 
-- Claude Code: `~/.claude/{skills,hooks,agents,commands}`
-- Cursor: `~/.cursor/{skills,hooks,agents,commands}`
+- Claude Code: `~/.claude/{skills,hooks,agents,commands,rules}`
+- Cursor: `~/.cursor/{skills,hooks,agents,commands,rules}`
 - Codex:
   - 默认启用 `~/.codex/{skills,commands}`
   - `hooks/agents` 默认禁用，可通过 `snakehub paths set` 或可视化页面开启
+- OpenCow:
+  - 全局目录：`~/.opencow/capabilities/{skills,hooks,agents,commands,rules}`
+  - 项目目录：`<project>/.opencow/{skills,hooks,agents,commands,rules}`
 
 ## 开发
 

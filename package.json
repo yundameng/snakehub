@@ -1,6 +1,6 @@
 {
   "name": "snakehub",
-  "version": "0.1.2",
+  "version": "0.1.6",
   "description": "Local cross-tool AI assets hub (skills/hooks/agents/commands/rules)",
   "main": "electron-shell/main.js",
   "files": [

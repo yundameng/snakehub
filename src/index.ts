@@ -68,9 +68,9 @@ Commands:
   snakehub import-git --type <skill|hook|agent|command|rule> --repo <url_or_path> [--ref <ref>] [--select <path_or_name>] [--all] [--list]
   snakehub list [--json]
   snakehub paths [--json]
-  snakehub paths set --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule> --path <dir>
-  snakehub paths unset --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule>
-  snakehub link --resource <resource_id_or_name> --tool <claude|cursor|codex> [--as <name>]
+  snakehub paths set --tool <claude|cursor|codex|opencow> --type <skill|hook|agent|command|rule> --path <dir>
+  snakehub paths unset --tool <claude|cursor|codex|opencow> --type <skill|hook|agent|command|rule>
+  snakehub link --resource <resource_id_or_name> --tool <claude|cursor|codex|opencow> [--as <name>]
   snakehub rollback [--op <operation_id>]
 `;
   process.stdout.write(help);
@@ -238,7 +238,7 @@ async function run(): Promise<void> {
         return;
       }
 
-      const order = ["claude", "cursor", "codex"];
+      const order = ["claude", "cursor", "codex", "opencow"];
       for (const toolId of order) {
         const toolEntries = entries.filter((entry) => entry.toolId === toolId);
         if (toolEntries.length === 0) {
@@ -263,7 +263,7 @@ async function run(): Promise<void> {
       const targetPath = getStringFlag(parsed.flags, "path");
       if (!toolId || !typeRaw || !targetPath) {
         throw new Error(
-          "Usage: snakehub paths set --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule> --path <dir>",
+          "Usage: snakehub paths set --tool <claude|cursor|codex|opencow> --type <skill|hook|agent|command|rule> --path <dir>",
         );
       }
       const type = normalizeResourceType(typeRaw);
@@ -276,7 +276,7 @@ async function run(): Promise<void> {
       const toolId = getStringFlag(parsed.flags, "tool");
       const typeRaw = getStringFlag(parsed.flags, "type");
       if (!toolId || !typeRaw) {
-        throw new Error("Usage: snakehub paths unset --tool <claude|cursor|codex> --type <skill|hook|agent|command|rule>");
+        throw new Error("Usage: snakehub paths unset --tool <claude|cursor|codex|opencow> --type <skill|hook|agent|command|rule>");
       }
       const type = normalizeResourceType(typeRaw);
       await unsetToolPathOverride({ toolId, type });
@@ -294,7 +294,7 @@ async function run(): Promise<void> {
 
     if (!resourceToken || !toolId) {
       throw new Error(
-        "Usage: snakehub link --resource <resource_id_or_name> --tool <claude|cursor|codex> [--as <name>]",
+        "Usage: snakehub link --resource <resource_id_or_name> --tool <claude|cursor|codex|opencow> [--as <name>]",
       );
     }
 

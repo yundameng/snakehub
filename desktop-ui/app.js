@@ -11,7 +11,7 @@ const el = {
   linkScopePath: document.getElementById("linkScopePath"),
   toolScopeClearBtn: document.getElementById("toolScopeClearBtn"),
   linkScopeClearBtn: document.getElementById("linkScopeClearBtn"),
-  resourceSelect: document.getElementById("resourceSelect"),
+  resourceChecklist: document.getElementById("resourceChecklist"),
   eventLog: document.getElementById("eventLog"),
   operationRecords: document.getElementById("operationRecords"),
   wizardPanel: document.getElementById("wizardPanel"),
@@ -25,6 +25,13 @@ const el = {
   conflictToolTabs: document.getElementById("conflictToolTabs"),
   conflictList: document.getElementById("conflictList"),
   conflictDetail: document.getElementById("conflictDetail"),
+  docsWritebackSection: document.getElementById("docsWritebackSection"),
+  docsWritebackSummary: document.getElementById("docsWritebackSummary"),
+  docsWritebackProjectPath: document.getElementById("docsWritebackProjectPath"),
+  docsDetectBtn: document.getElementById("docsDetectBtn"),
+  docsApplyBtn: document.getElementById("docsApplyBtn"),
+  docsWritebackMeta: document.getElementById("docsWritebackMeta"),
+  docsWritebackTree: document.getElementById("docsWritebackTree"),
   localDropZone: document.getElementById("localDropZone"),
   localRepoDropZone: document.getElementById("localRepoDropZone"),
   localPathInput: document.getElementById("localPathInput"),
@@ -63,6 +70,7 @@ const el = {
   linkAllModeToggle: document.getElementById("linkAllModeToggle"),
   linkResourceRow: document.getElementById("linkResourceRow"),
   linkAllTypesRow: document.getElementById("linkAllTypesRow"),
+  linkRulesHint: document.getElementById("linkRulesHint"),
   linkCreateBtn: document.getElementById("linkCreateBtn"),
   pathSetForm: document.getElementById("pathSetForm"),
   pathUnsetBtn: document.getElementById("pathUnsetBtn"),
@@ -88,6 +96,10 @@ let toolBrowserPickMap = new Map();
 let toolBrowserTypePickMap = new Map();
 let currentBrowserScopePath = "";
 let currentLinkScopePath = "";
+let currentLinkProjectType = "";
+let currentLinkRulesBucket = "";
+let linkProjectDetecting = false;
+let linkProjectDetectSeq = 0;
 let repoScanState = {
   repoPath: "",
   repoId: "",
@@ -108,6 +120,7 @@ let selectedConflictId = "";
 let localBatchImportContext = null;
 let localImportTab = "single";
 const REPO_HISTORY_STORAGE_KEY = "snakehub_repo_history_v1";
+const DOCS_WRITEBACK_PATH_STORAGE_KEY = "snakehub_docs_writeback_project_path_v1";
 const REPO_OVERLAY_EXPAND_MS = 280;
 const REPO_OVERLAY_WIDE_DELAY_MS = 140;
 const REPO_OVERLAY_BACKDROP_SHOW_DELAY_MS = 40;
@@ -121,7 +134,39 @@ let repoOverlayCloseTimer = 0;
 let repoOverlayHideTimer = 0;
 let repoOverlayWide = false;
 let rollbackBusy = false;
-const REPO_GROUP_ONLY_TYPES = new Set(["hooks", "rules"]);
+let hubRemoveBusy = false;
+const REPO_REQUIRED_TYPES = new Set(["docs"]);
+const DOCS_AUTO_DETECT_INTERVAL_MS = 6 * 60 * 60 * 1000;
+let docsWritebackProjectPath = "";
+let docsWritebackDetection = null;
+let docsWritebackDetecting = false;
+let docsWritebackApplying = false;
+let docsWritebackLastDetectedAt = 0;
+let docsWritebackAutoTimer = 0;
+
+function isRepoGroupOnlyType(type) {
+  if (type === "hooks") return true;
+  if (type === "rules") return !repoScanState.rulesCanonicalValidation;
+  return false;
+}
+
+function getRequiredRepoCandidateKeys(candidates = repoScanState.candidates) {
+  return (Array.isArray(candidates) ? candidates : [])
+    .filter((item) => REPO_REQUIRED_TYPES.has(item.type))
+    .map((item) => item.key);
+}
+
+function hasRequiredRepoCandidates(candidates = repoScanState.candidates) {
+  return getRequiredRepoCandidateKeys(candidates).length > 0;
+}
+
+function getEffectiveRepoSelectedKeys() {
+  const selected = new Set(repoScanState.selectedKeys);
+  for (const key of getRequiredRepoCandidateKeys(repoScanState.candidates)) {
+    selected.add(key);
+  }
+  return [...selected];
+}
 
 function setRepoActionButtonsEnabled(enabled) {
   if (el.repoSelectAllBtn) el.repoSelectAllBtn.disabled = !enabled;
@@ -408,6 +453,10 @@ function updateLinkCreateButtonState() {
   if (!el.linkCreateBtn || !el.linkForm) {
     return;
   }
+  if (linkProjectDetecting) {
+    el.linkCreateBtn.disabled = true;
+    return;
+  }
   const allMode = Boolean(el.linkAllModeToggle && el.linkAllModeToggle.checked);
   if (allMode) {
     const selectedTypes = getSelectedLinkTypes();
@@ -419,8 +468,8 @@ function updateLinkCreateButtonState() {
 
   const toolSelect = el.linkForm.querySelector('select[name="toolId"]');
   const toolId = toolSelect instanceof HTMLSelectElement ? toolSelect.value.trim() : "";
-  const resourceId = el.resourceSelect ? String(el.resourceSelect.value || "").trim() : "";
-  el.linkCreateBtn.disabled = !resourceId || !toolId;
+  const selectedResourceIds = getSelectedResourceIds();
+  el.linkCreateBtn.disabled = selectedResourceIds.length === 0 || !toolId;
 }
 
 function updatePathSetButtonsState() {
@@ -442,6 +491,294 @@ function updateActionButtonsState() {
   updateGitImportButtonsState();
   updateLinkCreateButtonState();
   updatePathSetButtonsState();
+  updateDocsWritebackButtonsState();
+}
+
+function loadDocsWritebackProjectPath() {
+  try {
+    return String(window.localStorage.getItem(DOCS_WRITEBACK_PATH_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function saveDocsWritebackProjectPath(pathValue) {
+  try {
+    if (!pathValue) {
+      window.localStorage.removeItem(DOCS_WRITEBACK_PATH_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(DOCS_WRITEBACK_PATH_STORAGE_KEY, pathValue);
+  } catch {
+    // Ignore localStorage write failures.
+  }
+}
+
+async function loadDocsWritebackProjectPathFromServer() {
+  try {
+    const result = await api("/api/docs-writeback/config");
+    return String(result.result && result.result.projectPath ? result.result.projectPath : "").trim();
+  } catch {
+    return "";
+  }
+}
+
+async function saveDocsWritebackProjectPathToServer(pathValue) {
+  try {
+    await api("/api/docs-writeback/config", {
+      method: "POST",
+      body: JSON.stringify({ projectPath: String(pathValue || "").trim() }),
+    });
+  } catch (error) {
+    log(`保存 docs 文档回写项目地址失败：${getErrorMessage(error)}`);
+  }
+}
+
+function renderDocsWritebackTreeNodes(nodes) {
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    return `
+      <ul class="docs-tree-list">
+        <li class="asset-empty">空目录</li>
+      </ul>
+    `;
+  }
+  return `
+    <ul class="docs-tree-list">
+      ${nodes
+        .map((node) => {
+          const nameText = escapeHtml(node.name || "");
+          if (node.kind === "dir") {
+            return `
+              <li class="docs-tree-node docs-tree-dir">
+                <details open>
+                  <summary><span class="mono">${nameText}/</span></summary>
+                  ${renderDocsWritebackTreeNodes(Array.isArray(node.children) ? node.children : [])}
+                </details>
+              </li>
+            `;
+          }
+          const changedTag = node.changed ? `<span class="asset-tag docs-changed-tag">已改动</span>` : "";
+          const projectOnlyClass = node.projectOnly ? " docs-project-only-name" : "";
+          return `
+            <li class="docs-tree-node docs-tree-file">
+              <span class="mono${projectOnlyClass}">${nameText}</span>
+              ${changedTag}
+            </li>
+          `;
+        })
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderDocsWritebackModule() {
+  if (!el.docsWritebackSummary || !el.docsWritebackProjectPath || !el.docsWritebackMeta || !el.docsWritebackTree) {
+    return;
+  }
+
+  el.docsWritebackProjectPath.value = docsWritebackProjectPath || "";
+
+  if (!docsWritebackProjectPath) {
+    el.docsWritebackSummary.textContent = "未就绪";
+    el.docsWritebackMeta.textContent = "请先使用“GitLab 下载并导入中心仓库（内部）”或“从本地路径导入 > 技能仓库导入”生成项目地址。";
+    el.docsWritebackTree.innerHTML = `<div class="asset-empty">当前无项目地址。</div>`;
+    updateDocsWritebackButtonsState();
+    return;
+  }
+
+  if (docsWritebackDetecting) {
+    el.docsWritebackSummary.textContent = "检测中";
+  } else if (docsWritebackDetection) {
+    const changedCount = Array.isArray(docsWritebackDetection.changedFiles)
+      ? docsWritebackDetection.changedFiles.length
+      : 0;
+    const projectOnlyCount = Array.isArray(docsWritebackDetection.projectOnlyFiles)
+      ? docsWritebackDetection.projectOnlyFiles.length
+      : 0;
+    if (changedCount === 0 && projectOnlyCount === 0) {
+      el.docsWritebackSummary.textContent = "已同步";
+    } else {
+      el.docsWritebackSummary.textContent = `待同步 ${changedCount + projectOnlyCount}`;
+    }
+  } else {
+    el.docsWritebackSummary.textContent = "待检测";
+  }
+
+  if (!docsWritebackDetection) {
+    el.docsWritebackMeta.textContent = "尚未检测。该项目地址每6小时会自动检测一次 docs 是否改动。";
+    el.docsWritebackTree.innerHTML = `<div class="asset-empty">点击“检测 docs 改动”开始比对。</div>`;
+    updateDocsWritebackButtonsState();
+    return;
+  }
+
+  const changedCount = Array.isArray(docsWritebackDetection.changedFiles)
+    ? docsWritebackDetection.changedFiles.length
+    : 0;
+  const projectOnlyCount = Array.isArray(docsWritebackDetection.projectOnlyFiles)
+    ? docsWritebackDetection.projectOnlyFiles.length
+    : 0;
+  const lastDetectedText = docsWritebackLastDetectedAt
+    ? new Date(docsWritebackLastDetectedAt).toLocaleString()
+    : "未检测";
+  el.docsWritebackMeta.textContent =
+    `中心仓库 docs：${docsWritebackDetection.docsStorePath || "-"} | ` +
+    `项目 docs：${docsWritebackDetection.projectDocsPath || "-"} | ` +
+    `中心改动：${changedCount} | 项目新增：${projectOnlyCount} | 最近检测：${lastDetectedText}`;
+
+  const treeHtml = renderDocsWritebackTreeNodes(Array.isArray(docsWritebackDetection.tree) ? docsWritebackDetection.tree : []);
+  el.docsWritebackTree.innerHTML = `
+    <div class="docs-tree-root">
+      <div class="mono docs-tree-root-title">docs/</div>
+      ${treeHtml}
+    </div>
+  `;
+  updateDocsWritebackButtonsState();
+}
+
+function updateDocsWritebackButtonsState() {
+  if (el.docsDetectBtn) {
+    el.docsDetectBtn.disabled = !docsWritebackProjectPath || docsWritebackDetecting || docsWritebackApplying;
+  }
+  if (el.docsApplyBtn) {
+    el.docsApplyBtn.disabled = !docsWritebackProjectPath || docsWritebackDetecting || docsWritebackApplying;
+  }
+}
+
+function syncDocsWritebackAutoTimer() {
+  if (docsWritebackProjectPath) {
+    if (!docsWritebackAutoTimer) {
+      docsWritebackAutoTimer = window.setInterval(() => {
+        detectDocsWritebackChanges("auto");
+      }, DOCS_AUTO_DETECT_INTERVAL_MS);
+    }
+    return;
+  }
+
+  if (docsWritebackAutoTimer) {
+    window.clearInterval(docsWritebackAutoTimer);
+    docsWritebackAutoTimer = 0;
+  }
+}
+
+function setDocsWritebackProjectPath(pathValue, sourceLabel = "", options = {}) {
+  const persistServer = options.persistServer !== false;
+  const silentLog = options.silentLog === true;
+  const detectNow = options.detectNow === true;
+  const normalized = String(pathValue || "").trim();
+  if (normalized === docsWritebackProjectPath) {
+    syncDocsWritebackAutoTimer();
+    renderDocsWritebackModule();
+    if (detectNow && normalized) {
+      detectDocsWritebackChanges("auto");
+    }
+    return;
+  }
+
+  docsWritebackProjectPath = normalized;
+  docsWritebackDetection = null;
+  docsWritebackLastDetectedAt = 0;
+  saveDocsWritebackProjectPath(docsWritebackProjectPath);
+  if (persistServer) {
+    saveDocsWritebackProjectPathToServer(docsWritebackProjectPath);
+  }
+  syncDocsWritebackAutoTimer();
+  renderDocsWritebackModule();
+
+  if (!silentLog && docsWritebackProjectPath) {
+    const sourcePrefix = sourceLabel ? `${sourceLabel}：` : "";
+    log(`${sourcePrefix}docs文档回写项目地址已更新：${docsWritebackProjectPath}`);
+  }
+  if (detectNow && docsWritebackProjectPath) {
+    detectDocsWritebackChanges("auto");
+  }
+}
+
+async function detectDocsWritebackChanges(trigger = "manual") {
+  if (!docsWritebackProjectPath) {
+    if (trigger === "manual") {
+      log("请先通过仓库导入功能生成项目地址");
+    }
+    return;
+  }
+  if (docsWritebackDetecting || docsWritebackApplying) {
+    return;
+  }
+
+  docsWritebackDetecting = true;
+  updateDocsWritebackButtonsState();
+  renderDocsWritebackModule();
+
+  const detectButton = el.docsDetectBtn instanceof HTMLButtonElement ? el.docsDetectBtn : null;
+  const done = detectButton
+    ? setBusy(detectButton, trigger === "auto" ? "自动检测中..." : "检测中...")
+    : () => {};
+  try {
+    const result = await api("/api/docs-writeback/detect", {
+      method: "POST",
+      body: JSON.stringify({ projectPath: docsWritebackProjectPath }),
+    });
+    docsWritebackDetection = result.result || null;
+    docsWritebackLastDetectedAt = Date.now();
+    renderDocsWritebackModule();
+
+    const changedCount = Array.isArray(docsWritebackDetection && docsWritebackDetection.changedFiles)
+      ? docsWritebackDetection.changedFiles.length
+      : 0;
+    const projectOnlyCount = Array.isArray(docsWritebackDetection && docsWritebackDetection.projectOnlyFiles)
+      ? docsWritebackDetection.projectOnlyFiles.length
+      : 0;
+    if (trigger === "manual") {
+      log(`docs 检测完成：中心改动 ${changedCount}，项目新增 ${projectOnlyCount}`);
+    } else if (changedCount > 0 || projectOnlyCount > 0) {
+      log(`自动检测到 docs 待同步：中心改动 ${changedCount}，项目新增 ${projectOnlyCount}`);
+    }
+  } catch (error) {
+    if (trigger === "manual") {
+      log(`docs 改动检测失败：${getErrorMessage(error)}`);
+    } else {
+      log(`docs 自动检测失败：${getErrorMessage(error)}`);
+    }
+  } finally {
+    done();
+    docsWritebackDetecting = false;
+    updateDocsWritebackButtonsState();
+    renderDocsWritebackModule();
+  }
+}
+
+async function applyDocsWriteback() {
+  if (!docsWritebackProjectPath) {
+    log("请先通过仓库导入功能生成项目地址");
+    return;
+  }
+  if (docsWritebackApplying || docsWritebackDetecting) {
+    return;
+  }
+
+  docsWritebackApplying = true;
+  updateDocsWritebackButtonsState();
+  const applyButton = el.docsApplyBtn instanceof HTMLButtonElement ? el.docsApplyBtn : null;
+  const done = applyButton ? setBusy(applyButton, "同步中...") : () => {};
+  try {
+    const result = await api("/api/docs-writeback/apply", {
+      method: "POST",
+      body: JSON.stringify({ projectPath: docsWritebackProjectPath }),
+    });
+    const payload = result.result || {};
+    const wroteToProjectFiles = Array.isArray(payload.wroteToProjectFiles) ? payload.wroteToProjectFiles : [];
+    const wroteToStoreFiles = Array.isArray(payload.wroteToStoreFiles) ? payload.wroteToStoreFiles : [];
+    docsWritebackDetection = payload.detection || docsWritebackDetection;
+    docsWritebackLastDetectedAt = Date.now();
+    renderDocsWritebackModule();
+    log(`docs 文件同步完成：中心->项目 ${wroteToProjectFiles.length}，项目->中心 ${wroteToStoreFiles.length}`);
+  } catch (error) {
+    log(`docs 文件同步失败：${getErrorMessage(error)}`);
+  } finally {
+    done();
+    docsWritebackApplying = false;
+    updateDocsWritebackButtonsState();
+    renderDocsWritebackModule();
+  }
 }
 
 function getErrorMessage(error) {
@@ -480,9 +817,13 @@ function escapeHtml(value) {
 
 function detectRuleToolByPath(filePath) {
   const normalized = String(filePath || "").trim().toLowerCase();
+  const unixPath = normalized.replaceAll("\\", "/");
   if (normalized.endsWith(".mdc")) return "cursor";
-  if (normalized.endsWith(".md")) return "claude";
   if (normalized.endsWith(".rules")) return "codex";
+  if (normalized.endsWith(".md")) {
+    if (unixPath.includes("/.opencow/")) return "opencow";
+    return "claude";
+  }
   return "";
 }
 
@@ -501,6 +842,7 @@ function expectedRuleExtensionForTool(toolId) {
   if (toolId === "cursor") return ".mdc";
   if (toolId === "claude") return ".md";
   if (toolId === "codex") return ".rules";
+  if (toolId === "opencow") return ".md";
   return "";
 }
 
@@ -522,6 +864,19 @@ function renderOperationRecords(operations) {
     return;
   }
 
+  const mappingList =
+    currentOverview && currentOverview.state && Array.isArray(currentOverview.state.mappings)
+      ? currentOverview.state.mappings
+      : [];
+  const mappingActiveById = new Map(
+    mappingList
+      .map((mapping) => ({
+        id: String(mapping && mapping.id ? mapping.id : ""),
+        active: Boolean(mapping && mapping.active),
+      }))
+      .filter((item) => item.id),
+  );
+
   const list = Array.isArray(operations) ? operations.slice().reverse() : [];
   if (list.length === 0) {
     el.operationRecords.innerHTML = `<div class="asset-empty">暂无可展示的操作记录。</div>`;
@@ -532,6 +887,7 @@ function renderOperationRecords(operations) {
     import: "导入",
     link: "链接",
     rollback: "回滚",
+    remove: "移除",
   };
 
   el.operationRecords.innerHTML = list
@@ -539,6 +895,7 @@ function renderOperationRecords(operations) {
       const details = op && typeof op === "object" ? op.details || {} : {};
       const opType = String(op.type || "");
       const operationId = String(op.id || "");
+      const mappingId = String(details.mappingId || "");
       const linkPath = String(details.linkPath || "");
       const toolId = String(details.toolId || "");
       const sourcePath = String(details.sourcePath || "");
@@ -550,19 +907,43 @@ function renderOperationRecords(operations) {
         summary = `${toolId ? `${toolId} · ` : ""}${linkPath || "(缺少 linkPath)"}`;
       } else if (opType === "rollback") {
         summary = `${linkPath || "(缺少 linkPath)"}${sourceOperationId ? ` · 来源 ${sourceOperationId}` : ""}`;
+      } else if (opType === "remove") {
+        const resourceType = String(details.resourceType || "");
+        const resourceName = String(details.resourceName || details.resourceId || "");
+        const deactivatedMappings = Number(details.deactivatedMappings || 0);
+        const base = `${resourceType || "resource"} · ${resourceName || "(缺少 resourceId)"}`;
+        summary = sourcePath || linkPath || "";
+        if (summary) {
+          summary = `${base} · ${summary}`;
+        } else {
+          summary = base;
+        }
+        if (deactivatedMappings > 0) {
+          summary += ` · 停用链接 ${deactivatedMappings}`;
+        }
       } else {
         summary = sourcePath || "(无附加信息)";
       }
 
-      const rollbackable = opType === "link" && operationId && linkPath;
+      const isInvalidLink =
+        opType === "link" &&
+        Boolean(mappingId) &&
+        mappingActiveById.has(mappingId) &&
+        mappingActiveById.get(mappingId) === false;
+      const rollbackable = opType === "link" && operationId && linkPath && !isInvalidLink;
       const rollbackClass = rollbackable ? " rollbackable" : "";
+      const invalidClass = isInvalidLink ? " invalid" : "";
       const rollbackData = rollbackable
         ? ` data-operation-id="${escapeHtml(operationId)}" data-link-path="${escapeHtml(linkPath)}"`
         : "";
-      const rollbackHint = rollbackable ? `<div class="operation-action">点击回滚此条</div>` : "";
+      const rollbackHint = isInvalidLink
+        ? `<div class="operation-action invalid">已失效</div>`
+        : rollbackable
+          ? `<div class="operation-action">点击回滚此条</div>`
+          : "";
 
       return `
-        <article class="operation-item${rollbackClass}"${rollbackData}>
+        <article class="operation-item${rollbackClass}${invalidClass}"${rollbackData}>
           <div class="operation-head">
             <span class="operation-type ${escapeHtml(opType)}">${escapeHtml(typeLabel)}</span>
             <span class="operation-time">${escapeHtml(formatOperationTime(String(op.createdAt || "")))}</span>
@@ -592,6 +973,89 @@ function renderScopeInputs() {
   }
 }
 
+function getSelectedLinkToolId() {
+  if (!el.linkForm) {
+    return "";
+  }
+  const toolSelect = el.linkForm.querySelector('select[name="toolId"]');
+  return toolSelect instanceof HTMLSelectElement ? toolSelect.value.trim() : "";
+}
+
+function updateLinkRulesHint() {
+  if (!el.linkRulesHint) {
+    return;
+  }
+  const toolId = getSelectedLinkToolId() || "当前工具";
+  if (linkProjectDetecting) {
+    el.linkRulesHint.textContent = "正在识别项目类型...";
+    el.linkRulesHint.classList.add("loading");
+    return;
+  }
+  el.linkRulesHint.classList.remove("loading");
+  if (!currentLinkScopePath) {
+    el.linkRulesHint.textContent = `适配 ${toolId} 的「全局」rules规则默认会被链接`;
+    return;
+  }
+  if (currentLinkRulesBucket) {
+    el.linkRulesHint.textContent = `适配 ${toolId} 的「${currentLinkRulesBucket}」rules规则默认会被链接`;
+    return;
+  }
+  el.linkRulesHint.textContent = "未识别项目类型，创建链接时将再次检测";
+}
+
+async function detectLinkProjectType(projectPath) {
+  const normalized = String(projectPath || "").trim();
+  const requestId = ++linkProjectDetectSeq;
+  if (!normalized) {
+    currentLinkProjectType = "";
+    currentLinkRulesBucket = "";
+    linkProjectDetecting = false;
+    updateLinkRulesHint();
+    updateLinkCreateButtonState();
+    return;
+  }
+
+  linkProjectDetecting = true;
+  currentLinkProjectType = "";
+  currentLinkRulesBucket = "";
+  updateLinkRulesHint();
+  updateLinkCreateButtonState();
+
+  try {
+    const result = await api("/api/project/detect-type", {
+      method: "POST",
+      body: JSON.stringify({ projectPath: normalized }),
+    });
+    if (requestId !== linkProjectDetectSeq) {
+      return;
+    }
+    const payload = result.result || {};
+    if (payload.detected) {
+      currentLinkProjectType = String(payload.projectType || "").trim();
+      currentLinkRulesBucket = String(payload.rulesBucket || "").trim();
+      log(`项目类型识别完成：${currentLinkProjectType}（rules来源 ${currentLinkRulesBucket || "全局"}）`);
+    } else {
+      currentLinkProjectType = "";
+      currentLinkRulesBucket = "";
+      log("项目类型未识别：支持 php / vue / 微信小程序");
+    }
+  } catch (error) {
+    if (requestId !== linkProjectDetectSeq) {
+      return;
+    }
+    currentLinkProjectType = "";
+    currentLinkRulesBucket = "";
+    log(`项目类型识别失败：${getErrorMessage(error)}`);
+  } finally {
+    if (requestId !== linkProjectDetectSeq) {
+      return;
+    }
+    linkProjectDetecting = false;
+    updateLinkRulesHint();
+    updateLinkCreateButtonState();
+  }
+}
+
 function getDirectoryPicker() {
   if (window.cowhubDesktop && typeof window.cowhubDesktop.pickDirectory === "function") {
     return window.cowhubDesktop.pickDirectory;
@@ -607,14 +1071,45 @@ function getSelectedLinkTypes() {
   return checks.filter((item) => item instanceof HTMLInputElement && item.checked).map((item) => item.value);
 }
 
+function getSelectedResourceIds() {
+  if (!(el.resourceChecklist instanceof HTMLElement)) {
+    return [];
+  }
+  const selected = [...el.resourceChecklist.querySelectorAll('input[name="resourceTokens"]:checked')]
+    .map((input) => String(input.value || "").trim())
+    .filter(Boolean);
+  return [...new Set(selected)];
+}
+
 function syncLinkModeUI() {
   const allMode = Boolean(el.linkAllModeToggle && el.linkAllModeToggle.checked);
   if (el.linkResourceRow) {
     el.linkResourceRow.style.display = allMode ? "none" : "";
   }
-  if (el.resourceSelect) {
-    el.resourceSelect.disabled = allMode;
-    el.resourceSelect.required = !allMode;
+  if (el.linkRulesHint) {
+    el.linkRulesHint.style.display = allMode ? "none" : "inline";
+  }
+  if (el.resourceChecklist) {
+    const checks = [...el.resourceChecklist.querySelectorAll('input[name="resourceTokens"]')];
+    checks.forEach((item) => {
+      if (item instanceof HTMLInputElement) {
+        item.disabled = allMode;
+      }
+    });
+  }
+  if (el.linkForm) {
+    const checks = [...el.linkForm.querySelectorAll('input[name="linkTypes"][value="rules"]')];
+    checks.forEach((item) => {
+      if (!(item instanceof HTMLInputElement)) {
+        return;
+      }
+      if (allMode) {
+        item.checked = true;
+        item.disabled = true;
+      } else {
+        item.disabled = false;
+      }
+    });
   }
   const aliasInput = el.linkForm ? el.linkForm.querySelector('input[name="aliasName"]') : null;
   if (aliasInput instanceof HTMLInputElement) {
@@ -623,6 +1118,7 @@ function syncLinkModeUI() {
   if (el.linkAllTypesRow) {
     el.linkAllTypesRow.style.display = allMode ? "flex" : "none";
   }
+  updateLinkRulesHint();
   updateLinkCreateButtonState();
 }
 
@@ -652,6 +1148,7 @@ function toolSortOrder(toolId) {
   if (toolId === "cursor") return 0;
   if (toolId === "claude") return 1;
   if (toolId === "codex") return 2;
+  if (toolId === "opencow") return 3;
   return 99;
 }
 
@@ -954,7 +1451,19 @@ function renderHubStoreResources(resources) {
             <div class="hub-row-head">
               <span class="mono">${escapeHtml(item.name)}</span>${renderRuleToolBadgeByPath(item.type, item.sourcePath)}
               <span class="hub-row-id">${escapeHtml(item.id)}</span>
+              <button
+                type="button"
+                class="hub-delete-btn"
+                data-resource-id="${escapeHtml(item.id)}"
+                data-resource-type="${escapeHtml(item.type)}"
+                data-resource-name="${escapeHtml(item.name)}"
+                title="移出中心仓库"
+                aria-label="移出中心仓库"
+              >
+                🗑
+              </button>
             </div>
+            <div class="hub-row-time">导入时间：${escapeHtml(formatOperationTime(String(item.createdAt || "")))}</div>
             <div class="asset-path">${escapeHtml(item.storePath)}</div>
           </li>
         `,
@@ -981,46 +1490,46 @@ function renderHubStoreResources(resources) {
 }
 
 function renderResourceOptions(resources) {
-  const previousValue = el.resourceSelect ? String(el.resourceSelect.value || "") : "";
-  const toolSelect = el.linkForm ? el.linkForm.querySelector('select[name="toolId"]') : null;
-  const toolId = toolSelect instanceof HTMLSelectElement ? toolSelect.value.trim() : "";
-  const expectedRuleExt = expectedRuleExtensionForTool(toolId);
-
-  const filtered = resources.filter((resource) => {
-    if (resource.type !== "rules") {
-      return true;
-    }
-    if (!expectedRuleExt) {
-      return true;
-    }
-    return String(resource.sourcePath || "").toLowerCase().endsWith(expectedRuleExt);
-  });
+  const previousValues = new Set(getSelectedResourceIds());
+  const filtered = resources.filter((resource) => resource.type !== "rules");
 
   if (filtered.length === 0) {
-    el.resourceSelect.innerHTML = `<option value="">（当前无可链接资源）</option>`;
+    el.resourceChecklist.innerHTML = `<div class="asset-empty">（当前无可链接资源）</div>`;
     updateLinkCreateButtonState();
     return;
   }
 
-  el.resourceSelect.innerHTML = filtered
+  const nextSelection = filtered
+    .filter((resource) => previousValues.has(resource.id))
+    .map((resource) => resource.id);
+  if (nextSelection.length === 0) {
+    nextSelection.push(filtered[0].id);
+  }
+  const nextSelectionSet = new Set(nextSelection);
+
+  el.resourceChecklist.innerHTML = filtered
     .map((r) => {
-      const toolTag = r.type === "rules" ? detectRuleToolByPath(r.sourcePath) : "";
-      const label = toolTag ? `${r.name}（${r.type}/${toolTag}）` : `${r.name}（${r.type}）`;
-      return `<option value="${r.id}">${escapeHtml(label)}</option>`;
+      const checked = nextSelectionSet.has(r.id) ? "checked" : "";
+      return `
+        <label class="resource-check-item">
+          <input type="checkbox" name="resourceTokens" value="${escapeHtml(r.id)}" ${checked} />
+          <span>${escapeHtml(`${r.name}（${r.type}）`)}</span>
+        </label>
+      `;
     })
     .join("");
-  if (previousValue && filtered.some((resource) => resource.id === previousValue)) {
-    el.resourceSelect.value = previousValue;
-  }
+
+  updateLinkRulesHint();
   updateLinkCreateButtonState();
 }
 
 function typeSortOrder(type) {
   if (type === "skills") return 0;
-  if (type === "commands") return 1;
-  if (type === "hooks") return 2;
-  if (type === "rules") return 3;
-  if (type === "agents") return 4;
+  if (type === "docs") return 1;
+  if (type === "commands") return 2;
+  if (type === "hooks") return 3;
+  if (type === "rules") return 4;
+  if (type === "agents") return 5;
   return 99;
 }
 
@@ -1040,8 +1549,15 @@ function renderRepoCandidates() {
     grouped.set(item.type, list);
   }
 
-  for (const type of REPO_GROUP_ONLY_TYPES) {
+  for (const type of [...grouped.keys()]) {
     const list = grouped.get(type) || [];
+    if (type === "rules" && list.length > 0) {
+      list.forEach((item) => selectedKeys.add(item.key));
+      continue;
+    }
+    if (!isRepoGroupOnlyType(type)) {
+      continue;
+    }
     if (list.length === 0) {
       continue;
     }
@@ -1055,15 +1571,22 @@ function renderRepoCandidates() {
     .sort((a, b) => typeSortOrder(a[0]) - typeSortOrder(b[0]))
     .map(([type, list]) => {
       list.sort((x, y) => x.relativePath.localeCompare(y.relativePath));
-      const groupOnly = REPO_GROUP_ONLY_TYPES.has(type);
+      const groupOnly = isRepoGroupOnlyType(type);
+      const requiredType = REPO_REQUIRED_TYPES.has(type);
+      const lockedType = type === "rules";
       const allChecked = list.length > 0 && list.every((item) => selectedKeys.has(item.key));
+      const typeCheckedAttrs = lockedType ? "checked disabled" : allChecked ? "checked" : "";
       const rows = list
         .map((item) => {
-          const checked = selectedKeys.has(item.key) ? "checked" : "";
-          const badge = renderRuleToolBadgeByPath(type, item.relativePath);
+          const checked = lockedType || selectedKeys.has(item.key) ? "checked" : "";
+          const itemDisabled = lockedType ? "disabled" : "";
+          const badge =
+            type === "rules" && repoScanState.rulesCanonicalValidation
+              ? ""
+              : renderRuleToolBadgeByPath(type, item.relativePath);
           return `
             ${
-              groupOnly
+              groupOnly || requiredType
                 ? `
             <div class="repo-item">
               <span class="repo-item-body">
@@ -1074,7 +1597,7 @@ function renderRepoCandidates() {
             `
                 : `
             <label class="repo-item">
-              <input type="checkbox" class="repo-candidate-check" data-key="${escapeHtml(item.key)}" ${checked} />
+              <input type="checkbox" class="repo-candidate-check" data-key="${escapeHtml(item.key)}" ${checked} ${itemDisabled} />
               <span class="repo-item-body">
                 <span class="mono">${escapeHtml(item.name)}</span>${badge}
                 <span class="asset-path">${escapeHtml(item.relativePath)}</span>
@@ -1091,12 +1614,30 @@ function renderRepoCandidates() {
           ${
             groupOnly
               ? `
-          <label class="repo-group-title">
-            <input type="checkbox" class="repo-type-check" data-type="${escapeHtml(type)}" ${allChecked ? "checked" : ""} />
-            ${escapeHtml(type)}（${list.length}）
-          </label>
+          <div class="repo-group-head">
+            <div class="repo-group-title">${escapeHtml(type)}（${list.length}）</div>
+            <label class="repo-group-toggle">
+              <span>全选</span>
+              <input type="checkbox" class="repo-type-check" data-type="${escapeHtml(type)}" ${typeCheckedAttrs} />
+            </label>
+          </div>
           `
-              : `<div class="repo-group-title">${type}（${list.length}）</div>`
+              : type === "rules" && repoScanState.rulesCanonicalValidation
+                ? `
+          <div class="repo-group-head">
+            <div class="repo-group-title">${escapeHtml(type)}（${list.length}）</div>
+            <label class="repo-group-toggle">
+              <span>全选</span>
+              <input type="checkbox" class="repo-type-check" data-type="${escapeHtml(type)}" ${typeCheckedAttrs} />
+            </label>
+          </div>
+          `
+              : requiredType
+                ? `
+          <div class="repo-group-title">${type}（${list.length}）</div>
+          <div class="hint-line">该目录必须导入，不可取消</div>
+          `
+                : `<div class="repo-group-title">${type}（${list.length}）</div>`
           }
           <div class="repo-group-list">${rows}</div>
         </section>
@@ -1107,7 +1648,9 @@ function renderRepoCandidates() {
   el.repoCandidates.innerHTML = `<div class="repo-grid">${sections}</div>`;
   if (el.repoSelectAllBtn) el.repoSelectAllBtn.disabled = false;
   if (el.repoClearBtn) el.repoClearBtn.disabled = false;
-  if (el.repoImportBtn) el.repoImportBtn.disabled = selectedKeys.size === 0;
+  if (el.repoImportBtn) {
+    el.repoImportBtn.disabled = selectedKeys.size === 0 && !hasRequiredRepoCandidates(candidates);
+  }
   renderRepoHistoryCount();
 }
 
@@ -1544,7 +2087,7 @@ async function onRepoScanSubmit(event) {
       body: JSON.stringify(payload),
     });
     applyRepoScanResult(result.result, "GitLab 下载并扫描");
-    log(`仓库扫描完成：${repoScanState.candidates.length} 项，默认全选`);
+    log(`仓库扫描完成：${repoScanState.candidates.length} 项，已默认全选可选项（docs 如存在为必选）`);
   } catch (error) {
     log(`仓库扫描失败：${getErrorMessage(error)}`);
     el.repoScanMeta.textContent = `扫描失败：${getErrorMessage(error)}`;
@@ -1567,6 +2110,9 @@ async function onRepoScanSubmit(event) {
 function applyRepoScanResult(scanResult, sourceLabel = "") {
   const result = scanResult || {};
   const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  const optionalCandidateKeys = candidates
+    .filter((item) => !REPO_REQUIRED_TYPES.has(item.type))
+    .map((item) => item.key);
   repoScanState = {
     repoPath: result.repoPath || "",
     repoId: result.repoId || "",
@@ -1575,10 +2121,12 @@ function applyRepoScanResult(scanResult, sourceLabel = "") {
     multiToolset: Boolean(result.multiToolset),
     rulesCanonicalValidation: result.rulesCanonicalValidation !== false,
     candidates,
-    selectedKeys: new Set(candidates.map((item) => item.key)),
+    selectedKeys: new Set(optionalCandidateKeys),
   };
+  setDocsWritebackProjectPath(repoScanState.repoPath, sourceLabel || "仓库扫描", { detectNow: true });
 
   const selectedCount = repoScanState.selectedKeys.size;
+  const requiredCount = getRequiredRepoCandidateKeys(candidates).length;
   const modeText = repoScanState.multiToolset ? "多端工具集" : "标准模式";
   const rulesModeText = repoScanState.rulesCanonicalValidation ? "rules范式校验开" : "rules范式校验关";
   const sourceText = sourceLabel ? `来源：${sourceLabel} | ` : "";
@@ -1587,7 +2135,7 @@ function applyRepoScanResult(scanResult, sourceLabel = "") {
     `本地目录：${repoScanState.repoPath} | ` +
     `模式：${modeText}/${rulesModeText} | ` +
     `候选：${repoScanState.candidates.length} | ` +
-    `已勾选：${selectedCount}`;
+    `已勾选：${selectedCount}${requiredCount > 0 ? ` | 必选：${requiredCount}` : ""}`;
   recordRepoHistoryEntry({
     repoId: repoScanState.repoId,
     repoUrl: repoScanState.repoUrl,
@@ -1612,7 +2160,7 @@ async function onLocalRepoScanSubmit(event) {
       body: JSON.stringify(payload),
     });
     applyRepoScanResult(result.result, "本地技能仓库扫描");
-    log(`本地技能仓库扫描完成：${repoScanState.candidates.length} 项，默认全选`);
+    log(`本地技能仓库扫描完成：${repoScanState.candidates.length} 项，已默认全选可选项（docs 如存在为必选）`);
   } catch (error) {
     log(`本地技能仓库扫描失败：${getErrorMessage(error)}`);
     el.repoScanMeta.textContent = `扫描失败：${getErrorMessage(error)}`;
@@ -1642,6 +2190,9 @@ function onRepoCandidatesChange(event) {
     if (!type) {
       return;
     }
+    if (type === "rules") {
+      return;
+    }
     const keys = repoScanState.candidates.filter((item) => item.type === type).map((item) => item.key);
     if (target.checked) {
       keys.forEach((key) => repoScanState.selectedKeys.add(key));
@@ -1659,6 +2210,10 @@ function onRepoCandidatesChange(event) {
   if (!key) {
     return;
   }
+  const picked = repoScanState.candidates.find((item) => item.key === key);
+  if (picked && picked.type === "rules") {
+    return;
+  }
 
   if (target.checked) {
     repoScanState.selectedKeys.add(key);
@@ -1667,21 +2222,24 @@ function onRepoCandidatesChange(event) {
   }
 
   if (el.repoImportBtn) {
-    el.repoImportBtn.disabled = repoScanState.selectedKeys.size === 0;
+    el.repoImportBtn.disabled =
+      repoScanState.selectedKeys.size === 0 && !hasRequiredRepoCandidates(repoScanState.candidates);
   }
 }
 
 function selectAllRepoCandidates() {
-  const keys = repoScanState.candidates.map((item) => item.key);
+  const keys = repoScanState.candidates
+    .filter((item) => !REPO_REQUIRED_TYPES.has(item.type))
+    .map((item) => item.key);
   repoScanState.selectedKeys = new Set(keys);
   renderRepoCandidates();
-  log(`已全选 ${repoScanState.selectedKeys.size} 项`);
+  log(`已全选 ${repoScanState.selectedKeys.size} 项可选资源`);
 }
 
 function clearRepoCandidateSelection() {
   repoScanState.selectedKeys = new Set();
   renderRepoCandidates();
-  log("已清空导入勾选");
+  log("已清空可选导入项（docs 如存在仍会导入）");
 }
 
 async function onPickRepoDirectory() {
@@ -1749,7 +2307,7 @@ async function onImportRepoCandidates() {
     return;
   }
 
-  const selectedKeys = [...repoScanState.selectedKeys];
+  const selectedKeys = getEffectiveRepoSelectedKeys();
   if (selectedKeys.length === 0) {
     log("请先勾选要导入的资源");
     return;
@@ -1775,6 +2333,12 @@ async function onImportRepoCandidates() {
     }
     if (result.result.rulesSnapshot) {
       log(`rules 目录结构已归档：${result.result.rulesSnapshot.snapshotDir}`);
+    }
+    if (result.result.docsImported) {
+      const docsInfo = result.result.docsImported;
+      log(
+        `docs 目录已导入：${docsInfo.storePath}${docsInfo.replaced ? "（已覆盖原 docs 目录）" : ""}`,
+      );
     }
     await refreshOverview("auto");
   } catch (error) {
@@ -1890,39 +2454,134 @@ async function onGitImport(event) {
   }
 }
 
+async function linkRulesByDefault(toolId, scopeLabel) {
+  const payload = {
+    toolId,
+    types: ["rules"],
+  };
+  if (currentLinkScopePath) {
+    payload.projectPath = currentLinkScopePath;
+  }
+  if (currentLinkProjectType) {
+    payload.projectTypeHint = currentLinkProjectType;
+  }
+  try {
+    const result = await api("/api/link/batch", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const summary = result.result || {};
+    log(
+      `rules 默认批量链接完成（${scopeLabel}）：尝试 ${summary.attempted || 0}，新建 ${summary.linked || 0}，已存在 ${summary.alreadyLinked || 0}，失败 ${(summary.failed || []).length}`,
+    );
+    if (summary.rulesCompanionNotice) {
+      log(summary.rulesCompanionNotice);
+    }
+  } catch (error) {
+    const message = getErrorMessage(error);
+    if (message.includes("No rules resources found")) {
+      log(`rules 默认批量链接跳过（${scopeLabel}）：${message}`);
+      return;
+    }
+    log(`rules 默认批量链接失败（${scopeLabel}）：${message}`);
+  }
+}
+
+function logLinkResult(result, scopeLabel) {
+  if (result && result.mode === "hooks-batch") {
+    log(
+      `hooks 批量链接完成（${scopeLabel}）：尝试 ${result.attempted || 0}，新建 ${result.linked || 0}，已存在 ${result.alreadyLinked || 0}，失败 ${(result.failed || []).length}`,
+    );
+    if (result.config) {
+      log(`hooks 配置文件已链接：${result.config.path}`);
+    }
+    return;
+  }
+  if (result && result.mode === "rules-batch") {
+    log(
+      `rules 批量链接完成（${scopeLabel}）：尝试 ${result.attempted || 0}，新建 ${result.linked || 0}，已存在 ${result.alreadyLinked || 0}，失败 ${(result.failed || []).length}`,
+    );
+    const companionFiles = result.companionFiles || [];
+    if (companionFiles.length > 0) {
+      log(`检测到源地址有配置文件和规则文件：${companionFiles.map((item) => item.name).join(", ")}，将跟随rules一起链接`);
+    }
+    return;
+  }
+  if (result && result.mapping && result.mapping.linkPath) {
+    log(`链接成功（${scopeLabel}）：${result.mapping.linkPath}`);
+    return;
+  }
+  log(`链接成功（${scopeLabel}）`);
+}
+
 async function onLinkSubmitSingle() {
   const form = el.linkForm;
   const done = setBusy(el.linkCreateBtn, "链接中...");
 
   try {
-    const payload = Object.fromEntries(new FormData(form).entries());
-    if (currentLinkScopePath) {
-      payload.projectPath = currentLinkScopePath;
+    const formData = new FormData(form);
+    const payload = Object.fromEntries(formData.entries());
+    const toolId = String(payload.toolId || "").trim();
+    const selectedResourceIds = getSelectedResourceIds();
+    if (selectedResourceIds.length === 0) {
+      log("请至少选择一个资源");
+      return;
     }
-    const result = await api("/api/link", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+
+    const aliasNameRaw = String(payload.aliasName || "").trim();
+    const aliasName = selectedResourceIds.length === 1 && aliasNameRaw ? aliasNameRaw : undefined;
+    if (aliasNameRaw && selectedResourceIds.length > 1) {
+      log("已选择多个资源，已忽略“别名”设置并按资源名链接");
+    }
+
     const scopeLabel = currentLinkScopePath ? `项目 ${currentLinkScopePath}` : "全局";
-    if (result.result && result.result.mode === "hooks-batch") {
-      log(
-        `hooks 批量链接完成（${scopeLabel}）：尝试 ${result.result.attempted || 0}，新建 ${result.result.linked || 0}，已存在 ${result.result.alreadyLinked || 0}，失败 ${(result.result.failed || []).length}`,
-      );
-      if (result.result.config) {
-        log(`hooks 配置文件已链接：${result.result.config.path}`);
+    let successCount = 0;
+    let shouldLinkRules = false;
+    const failed = [];
+
+    for (const resourceToken of selectedResourceIds) {
+      const requestPayload = {
+        resourceToken,
+        toolId,
+      };
+      if (aliasName) {
+        requestPayload.aliasName = aliasName;
       }
-    } else if (result.result && result.result.mode === "rules-batch") {
-      log(
-        `rules 批量链接完成（${scopeLabel}）：尝试 ${result.result.attempted || 0}，新建 ${result.result.linked || 0}，已存在 ${result.result.alreadyLinked || 0}，失败 ${(result.result.failed || []).length}`,
-      );
-      const companionFiles = result.result.companionFiles || [];
-      if (companionFiles.length > 0) {
-        log(`检测到源地址有配置文件和规则文件：${companionFiles.map((item) => item.name).join(", ")}，将跟随rules一起链接`);
+      if (currentLinkScopePath) {
+        requestPayload.projectPath = currentLinkScopePath;
+        if (currentLinkProjectType) {
+          requestPayload.projectTypeHint = currentLinkProjectType;
+        }
       }
-    } else {
-      log(`链接成功（${scopeLabel}）：${result.result.mapping.linkPath}`);
+      try {
+        const result = await api("/api/link", {
+          method: "POST",
+          body: JSON.stringify(requestPayload),
+        });
+        logLinkResult(result.result, scopeLabel);
+        if (!result.result || result.result.mode !== "rules-batch") {
+          shouldLinkRules = true;
+        }
+        successCount += 1;
+      } catch (error) {
+        const message = getErrorMessage(error);
+        failed.push({ resourceId: resourceToken, error: message });
+        log(`链接失败（${resourceToken}）：${message}`);
+      }
     }
-    await refreshOverview("auto");
+
+    if (selectedResourceIds.length > 1) {
+      log(`多选链接完成（${scopeLabel}）：成功 ${successCount}，失败 ${failed.length}`);
+    }
+    if (toolId && shouldLinkRules && successCount > 0) {
+      await linkRulesByDefault(toolId, scopeLabel);
+    }
+    if (failed.length > 0 && successCount === 0) {
+      log("多选链接未成功，请检查上方错误日志");
+    }
+    if (successCount > 0 || failed.length > 0) {
+      await refreshOverview("auto");
+    }
   } catch (error) {
     log(`链接失败：${getErrorMessage(error)}`);
   } finally {
@@ -1952,15 +2611,16 @@ async function onLinkAllRun() {
   try {
     const includesHooks = selectedTypes.includes("hooks");
     const includesRules = selectedTypes.includes("rules");
+    const selectedResourceIds = new Set(getSelectedResourceIds());
     const getSourcePathByType = (typeValue) => {
       if (localBatchImportContext && localBatchImportContext.type === typeValue) {
         return localBatchImportContext.sourcePath;
       }
-      if (!(currentOverview && el.resourceSelect)) {
+      if (!currentOverview) {
         return "";
       }
       const resource = (currentOverview.state.resources || []).find(
-        (item) => item.id === el.resourceSelect.value && item.type === typeValue,
+        (item) => selectedResourceIds.has(item.id) && item.type === typeValue,
       );
       return resource ? resource.sourcePath : "";
     };
@@ -1977,16 +2637,11 @@ async function onLinkAllRun() {
       }
       payload.hooksSourcePath = hooksSourcePath;
     }
-    if (includesRules) {
-      const rulesSourcePath = getSourcePathByType("rules");
-      if (!rulesSourcePath) {
-        log("批量链接 rules 需要来源 rules 目录。请先在浏览器中选择一个 rules 条目或使用类型箭头填充。");
-        return;
-      }
-      payload.rulesSourcePath = rulesSourcePath;
-    }
     if (currentLinkScopePath) {
       payload.projectPath = currentLinkScopePath;
+      if (currentLinkProjectType) {
+        payload.projectTypeHint = currentLinkProjectType;
+      }
     }
 
     const result = await api("/api/link/batch", {
@@ -2078,6 +2733,7 @@ async function onPickLinkScopeDirectory() {
     currentLinkScopePath = selected;
     renderScopeInputs();
     log(`链接项目范围已切换：${selected}`);
+    await detectLinkProjectType(selected);
   } catch (error) {
     log(`选择目录失败：${getErrorMessage(error)}`);
   }
@@ -2085,7 +2741,13 @@ async function onPickLinkScopeDirectory() {
 
 function onClearLinkScopeDirectory() {
   currentLinkScopePath = "";
+  linkProjectDetectSeq += 1;
+  linkProjectDetecting = false;
+  currentLinkProjectType = "";
+  currentLinkRulesBucket = "";
   renderScopeInputs();
+  updateLinkRulesHint();
+  updateLinkCreateButtonState();
   log("链接项目范围已切回全局");
 }
 
@@ -2144,6 +2806,46 @@ async function onRollback() {
   } finally {
     rollbackBusy = false;
     done();
+  }
+}
+
+async function onRemoveHubResource(resourceId, resourceType, resourceName) {
+  const resourceToken = String(resourceId || "").trim();
+  const typeValue = toPluralType(String(resourceType || "").trim());
+  const displayName = String(resourceName || "").trim();
+  if (!resourceToken || !typeValue) {
+    log("移除失败：缺少资源标识，请刷新后重试");
+    return;
+  }
+  if (hubRemoveBusy) {
+    log("移除进行中，请稍候");
+    return;
+  }
+
+  const ok = window.confirm(`是否将此${typeValue}移出中心仓库？`);
+  if (!ok) {
+    return;
+  }
+
+  hubRemoveBusy = true;
+  try {
+    const result = await api("/api/hub/remove-resource", {
+      method: "POST",
+      body: JSON.stringify({ resourceToken }),
+    });
+    const summary = result.result || {};
+    const nameLabel = displayName || String(summary.resourceName || resourceToken);
+    log(`已移出中心仓库：${typeValue}/${nameLabel}`);
+    const removedLinks = Number(summary.removedLinks || 0);
+    const deactivatedMappings = Number(summary.deactivatedMappings || 0);
+    if (removedLinks > 0 || deactivatedMappings > 0) {
+      log(`同步处理映射：停用 ${deactivatedMappings}，移除链接 ${removedLinks}`);
+    }
+    await refreshOverview("auto");
+  } catch (error) {
+    log(`移出中心仓库失败：${getErrorMessage(error)}`);
+  } finally {
+    hubRemoveBusy = false;
   }
 }
 
@@ -2316,6 +3018,16 @@ function bindEvents() {
       renderConflictModule();
     });
   }
+  if (el.docsDetectBtn) {
+    el.docsDetectBtn.addEventListener("click", () => {
+      detectDocsWritebackChanges("manual");
+    });
+  }
+  if (el.docsApplyBtn) {
+    el.docsApplyBtn.addEventListener("click", () => {
+      applyDocsWriteback();
+    });
+  }
   if (el.localImportTabs) {
     el.localImportTabs.addEventListener("click", (event) => {
       const target = event.target;
@@ -2364,6 +3076,7 @@ function bindEvents() {
       if (currentOverview && currentOverview.state) {
         renderResourceOptions(currentOverview.state.resources || []);
       }
+      updateLinkRulesHint();
     });
   }
   if (el.linkAllModeToggle) {
@@ -2387,6 +3100,22 @@ function bindEvents() {
       const operationId = item.getAttribute("data-operation-id") || "";
       const linkPath = item.getAttribute("data-link-path") || "";
       onRollbackByOperation(operationId, linkPath);
+    });
+  }
+  if (el.toolScanList) {
+    el.toolScanList.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const btn = target.closest(".hub-delete-btn");
+      if (!btn || !el.toolScanList.contains(btn)) {
+        return;
+      }
+      const resourceId = btn.getAttribute("data-resource-id") || "";
+      const resourceType = btn.getAttribute("data-resource-type") || "";
+      const resourceName = btn.getAttribute("data-resource-name") || "";
+      onRemoveHubResource(resourceId, resourceType, resourceName);
     });
   }
   el.toolBrowserSelect.addEventListener("change", () => {
@@ -2488,7 +3217,17 @@ function bindEvents() {
 
 async function boot() {
   repoHistoryEntries = loadRepoHistoryEntries();
+  docsWritebackProjectPath = loadDocsWritebackProjectPath();
+  const serverSavedPath = await loadDocsWritebackProjectPathFromServer();
+  if (serverSavedPath) {
+    docsWritebackProjectPath = serverSavedPath;
+    saveDocsWritebackProjectPath(serverSavedPath);
+  } else if (docsWritebackProjectPath) {
+    saveDocsWritebackProjectPathToServer(docsWritebackProjectPath);
+  }
   renderRepoHistoryCount();
+  syncDocsWritebackAutoTimer();
+  renderDocsWritebackModule();
   activateLocalImportTab("single");
   bindEvents();
   if (el.conflictTypeFilter) {
@@ -2496,6 +3235,9 @@ async function boot() {
   }
   syncLinkModeUI();
   updateActionButtonsState();
+  if (docsWritebackProjectPath) {
+    detectDocsWritebackChanges("auto");
+  }
   try {
     await refreshOverview("auto");
     el.toolBrowserSelect.value = "cursor";

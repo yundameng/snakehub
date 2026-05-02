@@ -29,6 +29,7 @@ export function hubPaths(root = getHubRoot()) {
     logs: path.join(root, "logs"),
     state: path.join(root, "db", "state.json"),
     toolPaths: path.join(root, "db", "tool-paths.json"),
+    docsWriteback: path.join(root, "db", "docs-writeback.json"),
   };
 }
 

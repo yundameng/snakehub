@@ -15,18 +15,21 @@ import {
 } from "./git-runtime";
 import { archiveHooksWithConfig, resolveHooksConfigSibling } from "./hooks-config";
 import { archiveRulesWithCompanions, detectRulesCompanionsForImport } from "./rules-config";
+import { copyRecursive, ensureDir, pathExists, removePath } from "./fs-utils";
 import { importResource } from "./importer";
+import { loadState, newId, nowIso, pushOperation, saveState } from "./state";
 import { ResourceType } from "./types";
 
 const execFile = promisify(execFileCb);
 const RESOURCE_TYPES: ResourceType[] = ["skills", "commands", "hooks", "rules", "agents"];
-const TOOLSET_BUCKETS = new Set(["vue_tools", "mini_tools"]);
+const TOOLSET_BUCKETS = new Set(["vue_tools", "mini_tools", "api_tools"]);
 const RULE_FILE_SUFFIXES = new Set([".md", ".mdc", ".rules"]);
-type RepoToolsetBucket = "vue_tools" | "mini_tools";
+type RepoToolsetBucket = "vue_tools" | "mini_tools" | "api_tools";
+export type RepoCandidateType = ResourceType | "docs";
 
 export interface RepoCandidate {
   key: string;
-  type: ResourceType;
+  type: RepoCandidateType;
   name: string;
   relativePath: string;
   absolutePath: string;
@@ -61,6 +64,9 @@ function detectToolsetBucketFromRelativePath(relPath: string): RepoToolsetBucket
   }
   if (segments.includes("mini_tools")) {
     return "mini_tools";
+  }
+  if (segments.includes("api_tools")) {
+    return "api_tools";
   }
   return undefined;
 }
@@ -373,6 +379,76 @@ async function findTypedCandidates(
   return candidates;
 }
 
+async function findDocsCandidates(repoPath: string): Promise<RepoCandidate[]> {
+  const docsDir = path.join(repoPath, "docs");
+  const isDocsDirectory = await fs
+    .stat(docsDir)
+    .then((item) => item.isDirectory())
+    .catch(() => false);
+  if (!isDocsDirectory) {
+    return [];
+  }
+  return [
+    {
+      key: "docs:docs",
+      type: "docs",
+      name: "docs",
+      relativePath: "docs",
+      absolutePath: docsDir,
+    },
+  ];
+}
+
+async function importDocsDirectoryToStore(input: {
+  docsSourceDir: string;
+  root?: string;
+}): Promise<{ storePath: string; replaced: boolean }> {
+  const root = input.root ?? getHubRoot();
+  await ensureHubLayout(root);
+  const sourceDir = path.resolve(input.docsSourceDir);
+  const sourceIsDirectory = await fs
+    .stat(sourceDir)
+    .then((item) => item.isDirectory())
+    .catch(() => false);
+  if (!sourceIsDirectory) {
+    throw new Error(`docs source is not a directory: ${sourceDir}`);
+  }
+
+  const docsStorePath = path.join(hubPaths(root).store, "docs");
+  const replaced = await pathExists(docsStorePath);
+  if (replaced) {
+    await removePath(docsStorePath);
+  }
+  await ensureDir(docsStorePath);
+
+  const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const from = path.join(sourceDir, entry.name);
+    const to = path.join(docsStorePath, entry.name);
+    await copyRecursive(from, to);
+  }
+
+  let state = await loadState(root);
+  state = pushOperation(state, {
+    id: newId("op"),
+    type: "import",
+    createdAt: nowIso(),
+    details: {
+      resourceType: "docs",
+      sourcePath: sourceDir,
+      storePath: docsStorePath,
+      replaced,
+      reused: false,
+    },
+  });
+  await saveState(state, root);
+
+  return {
+    storePath: docsStorePath,
+    replaced,
+  };
+}
+
 export async function ensureRepoCheckout(input: {
   repoUrl: string;
   ref?: string;
@@ -465,8 +541,9 @@ export async function scanRepoCandidates(input: {
   const hooks = await findTypedCandidates(repoPath, "hooks", multiToolset, rulesCanonicalValidation);
   const rules = await findTypedCandidates(repoPath, "rules", multiToolset, rulesCanonicalValidation);
   const agents = await findTypedCandidates(repoPath, "agents", multiToolset, rulesCanonicalValidation);
+  const docs = await findDocsCandidates(repoPath);
 
-  const candidates = [...skills, ...commands, ...hooks, ...rules, ...agents];
+  const candidates = [...skills, ...commands, ...hooks, ...rules, ...agents, ...docs];
   const unique = new Map<string, RepoCandidate>();
   for (const candidate of candidates) {
     unique.set(candidate.key, candidate);
@@ -495,7 +572,14 @@ export async function importRepoCandidatesToHub(input: {
   rulesCanonicalValidation?: boolean;
   root?: string;
 }): Promise<{
-  imported: Array<{ key: string; type: ResourceType; name: string; reused: boolean; resourceId: string }>;
+  imported: Array<{
+    key: string;
+    type: RepoCandidateType;
+    name: string;
+    reused: boolean;
+    resourceId?: string;
+    importedPath?: string;
+  }>;
   hooksSnapshot?: {
     snapshotDir: string;
     configFileName: string;
@@ -503,6 +587,11 @@ export async function importRepoCandidatesToHub(input: {
   rulesSnapshot?: {
     snapshotDir: string;
     companionFiles: string[];
+  };
+  docsImported?: {
+    sourcePath: string;
+    storePath: string;
+    replaced: boolean;
   };
 }> {
   const repoPath = path.resolve(input.repoPath);
@@ -515,6 +604,12 @@ export async function importRepoCandidatesToHub(input: {
   const byKey = new Map(scan.candidates.map((candidate) => [candidate.key, candidate]));
 
   const selected = [...new Set(input.selectedKeys.map((key) => key.trim()).filter(Boolean))];
+  const docsKeys = scan.candidates.filter((candidate) => candidate.type === "docs").map((candidate) => candidate.key);
+  for (const key of docsKeys) {
+    if (!selected.includes(key)) {
+      selected.push(key);
+    }
+  }
   if (selected.length === 0) {
     throw new Error("selectedKeys is empty.");
   }
@@ -530,7 +625,7 @@ export async function importRepoCandidatesToHub(input: {
   const allRuleKeys = new Set(allRuleCandidates.map((candidate) => candidate.key));
   const selectedRuleKeys = selected.filter((key) => allRuleKeys.has(key));
   const hasRuleSelection = selectedRuleKeys.length > 0;
-  if (hasRuleSelection && selectedRuleKeys.length !== allRuleCandidates.length) {
+  if (!input.rulesCanonicalValidation && hasRuleSelection && selectedRuleKeys.length !== allRuleCandidates.length) {
     throw new Error("Rules must be imported as a full set. Please select all rules candidates.");
   }
 
@@ -565,7 +660,21 @@ export async function importRepoCandidatesToHub(input: {
     });
   }
 
-  const imported: Array<{ key: string; type: ResourceType; name: string; reused: boolean; resourceId: string }> = [];
+  const imported: Array<{
+    key: string;
+    type: RepoCandidateType;
+    name: string;
+    reused: boolean;
+    resourceId?: string;
+    importedPath?: string;
+  }> = [];
+  let docsImported:
+    | {
+        sourcePath: string;
+        storePath: string;
+        replaced: boolean;
+      }
+    | undefined;
   async function importCandidate(override: {
     key: string;
     type: ResourceType;
@@ -590,6 +699,26 @@ export async function importRepoCandidatesToHub(input: {
   for (const key of selected) {
     const candidate = byKey.get(key);
     if (!candidate) {
+      continue;
+    }
+
+    if (candidate.type === "docs") {
+      const docsResult = await importDocsDirectoryToStore({
+        docsSourceDir: candidate.absolutePath,
+        root: input.root,
+      });
+      imported.push({
+        key: candidate.key,
+        type: candidate.type,
+        name: candidate.name,
+        reused: false,
+        importedPath: docsResult.storePath,
+      });
+      docsImported = {
+        sourcePath: candidate.absolutePath,
+        storePath: docsResult.storePath,
+        replaced: docsResult.replaced,
+      };
       continue;
     }
 
@@ -635,7 +764,7 @@ export async function importRepoCandidatesToHub(input: {
     });
   }
 
-  return { imported, hooksSnapshot, rulesSnapshot };
+  return { imported, hooksSnapshot, rulesSnapshot, docsImported };
 }
 
 export function resourceTypesOrder(): ResourceType[] {

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { TOOL_ADAPTERS } from "./adapters";
-import { pathExists } from "./fs-utils";
+import { pathExists, shouldIgnoreName } from "./fs-utils";
 import { fingerprintPath } from "./fingerprint";
 import { getHubRoot } from "./config";
 import { loadState } from "./state";
@@ -19,20 +19,65 @@ const RULE_SUFFIX_BY_TOOL: Record<string, string> = {
   claude: ".md",
   cursor: ".mdc",
   codex: ".rules",
+  opencow: ".md",
 };
 
-function shouldIncludeScannedEntry(toolId: string, type: ResourceType, entry: { name: string; isFile(): boolean }): boolean {
-  if (type !== "rules") {
-    return true;
-  }
-  if (!entry.isFile()) {
+async function hasExpectedRuleFileInDir(
+  dirPath: string,
+  expectedSuffix: string,
+  depth = 0,
+): Promise<boolean> {
+  if (depth > 6) {
     return false;
   }
-  const expected = RULE_SUFFIX_BY_TOOL[toolId];
+  const entries = await fs.readdir(dirPath, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || shouldIgnoreName(entry.name)) {
+      continue;
+    }
+    const abs = path.join(dirPath, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase().endsWith(expectedSuffix)) {
+      return true;
+    }
+    if (entry.isDirectory() && (await hasExpectedRuleFileInDir(abs, expectedSuffix, depth + 1))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function shouldIncludeScannedEntry(input: {
+  toolId: string;
+  type: ResourceType;
+  entry: { name: string; isFile(): boolean; isSymbolicLink(): boolean };
+  assetPath: string;
+}): Promise<boolean> {
+  if (input.type !== "rules") {
+    return true;
+  }
+  const expected = RULE_SUFFIX_BY_TOOL[input.toolId];
   if (!expected) {
     return false;
   }
-  return entry.name.toLowerCase().endsWith(expected);
+  if (input.entry.isFile()) {
+    return input.entry.name.toLowerCase().endsWith(expected);
+  }
+  if (!input.entry.isSymbolicLink()) {
+    return false;
+  }
+
+  const linked = await fs.stat(input.assetPath).catch(() => undefined);
+  if (!linked) {
+    return false;
+  }
+  if (linked.isFile()) {
+    const resolvedPath = await fs.realpath(input.assetPath).catch(() => input.assetPath);
+    return path.basename(resolvedPath).toLowerCase().endsWith(expected);
+  }
+  if (!linked.isDirectory()) {
+    return false;
+  }
+  return hasExpectedRuleFileInDir(input.assetPath, expected);
 }
 
 async function scanTargetDir(
@@ -52,11 +97,10 @@ async function scanTargetDir(
     if (entry.name.startsWith(".")) {
       continue;
     }
-    if (!shouldIncludeScannedEntry(toolId, type, entry)) {
+    const assetPath = path.join(dirPath, entry.name);
+    if (!(await shouldIncludeScannedEntry({ toolId, type, entry, assetPath }))) {
       continue;
     }
-
-    const assetPath = path.join(dirPath, entry.name);
     try {
       const stat = await fs.lstat(assetPath);
       const { fingerprint } = await fingerprintPath(assetPath);
