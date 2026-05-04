@@ -2,6 +2,7 @@ node_modules/
 dist/
 .DS_Store
 
+# Release artifacts are uploaded to GitHub Releases, not committed to git.
 release/
 docs/
 snakehub-0.1.4.zip

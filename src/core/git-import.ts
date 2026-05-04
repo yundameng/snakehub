@@ -286,6 +286,10 @@ export async function importFromRepo(input: {
         type: input.type,
         sourcePath: candidate.absolutePath,
         name: input.name || candidate.name,
+        sourceRelativePath:
+          candidate.relativePath && candidate.relativePath !== "."
+            ? candidate.relativePath
+            : `${input.type}/${input.name || candidate.name}`,
         root: input.root,
       });
 

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { ensureHubLayout, getHubRoot, hubPaths } from "./config";
+import { relativeStorePath, upsertDocsWritebackSyncGroup } from "./docs-writeback-map";
 import {
   annotateGitError,
   buildHttpsFallbackRepoUrl,
@@ -402,7 +403,7 @@ async function findDocsCandidates(repoPath: string): Promise<RepoCandidate[]> {
 async function importDocsDirectoryToStore(input: {
   docsSourceDir: string;
   root?: string;
-}): Promise<{ storePath: string; replaced: boolean }> {
+}): Promise<{ storePath: string; runtimePath: string; replaced: boolean }> {
   const root = input.root ?? getHubRoot();
   await ensureHubLayout(root);
   const sourceDir = path.resolve(input.docsSourceDir);
@@ -414,18 +415,24 @@ async function importDocsDirectoryToStore(input: {
     throw new Error(`docs source is not a directory: ${sourceDir}`);
   }
 
-  const docsStorePath = path.join(hubPaths(root).store, "docs");
-  const replaced = await pathExists(docsStorePath);
+  const p = hubPaths(root);
+  const docsStorePath = path.join(p.storeSource, "docs");
+  const docsRuntimePath = path.join(p.storeRuntime, "docs");
+  const replaced = (await pathExists(docsStorePath)) || (await pathExists(docsRuntimePath));
   if (replaced) {
     await removePath(docsStorePath);
+    await removePath(docsRuntimePath);
   }
   await ensureDir(docsStorePath);
+  await ensureDir(docsRuntimePath);
 
   const entries = await fs.readdir(sourceDir, { withFileTypes: true });
   for (const entry of entries) {
     const from = path.join(sourceDir, entry.name);
-    const to = path.join(docsStorePath, entry.name);
-    await copyRecursive(from, to);
+    const toSource = path.join(docsStorePath, entry.name);
+    const toRuntime = path.join(docsRuntimePath, entry.name);
+    await copyRecursive(from, toSource);
+    await copyRecursive(from, toRuntime);
   }
 
   let state = await loadState(root);
@@ -437,6 +444,7 @@ async function importDocsDirectoryToStore(input: {
       resourceType: "docs",
       sourcePath: sourceDir,
       storePath: docsStorePath,
+      runtimePath: docsRuntimePath,
       replaced,
       reused: false,
     },
@@ -445,6 +453,7 @@ async function importDocsDirectoryToStore(input: {
 
   return {
     storePath: docsStorePath,
+    runtimePath: docsRuntimePath,
     replaced,
   };
 }
@@ -680,14 +689,25 @@ export async function importRepoCandidatesToHub(input: {
     type: ResourceType;
     name: string;
     sourcePath: string;
+    canonicalRelativePath?: string;
     root?: string;
   }): Promise<void> {
     const result = await importResource({
       type: override.type,
       sourcePath: override.sourcePath,
       name: override.name,
+      sourceRelativePath: override.canonicalRelativePath,
       root: override.root,
     });
+    if (override.canonicalRelativePath) {
+      const aliasBase = relativeStorePath(result.resource.storePath, override.root);
+      await upsertDocsWritebackSyncGroup({
+        canonicalBase: override.canonicalRelativePath,
+        aliasBase,
+        resourceId: result.resource.id,
+        root: override.root,
+      });
+    }
     imported.push({
       key: override.key,
       type: override.type,
@@ -730,6 +750,7 @@ export async function importRepoCandidatesToHub(input: {
           type: candidate.type,
           name: candidate.name,
           sourcePath: candidate.absolutePath,
+          canonicalRelativePath: candidate.relativePath,
           root: input.root,
         });
 
@@ -746,6 +767,7 @@ export async function importRepoCandidatesToHub(input: {
             type: candidate.type,
             name: candidate.name,
             sourcePath: variantSourcePath,
+            canonicalRelativePath: candidate.relativePath,
             root: input.root,
           });
         }
@@ -760,6 +782,7 @@ export async function importRepoCandidatesToHub(input: {
       type: candidate.type,
       name: candidate.name,
       sourcePath: candidate.absolutePath,
+      canonicalRelativePath: candidate.relativePath,
       root: input.root,
     });
   }

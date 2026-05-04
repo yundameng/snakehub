@@ -27,7 +27,7 @@
           <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="link">链接资源</button>
           <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="path">路径覆盖</button>
           <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="conflict">冲突检查</button>
-          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="docs">Docs回写</button>
+          <button class="module-nav-btn" type="button" role="tab" aria-selected="false" data-module-target="docs">文件同步</button>
         </div>
         <div class="module-sidebar-footer">
           <button id="refreshBtn" class="btn btn-strong">立即扫描并刷新</button>
@@ -281,8 +281,9 @@
           <span id="docsWritebackSummary" class="badge">未就绪</span>
         </div>
         <div class="row">
-          <button id="docsDetectBtn" class="btn" type="button">检测 docs 改动</button>
+          <button id="docsDetectBtn" class="btn" type="button">检测资源改动</button>
           <button id="docsApplyBtn" class="btn btn-strong" type="button">文件同步</button>
+          <button id="docsRemoteSyncBtn" class="btn" type="button" hidden>同步到远端仓库</button>
         </div>
         <div id="docsWritebackMeta" class="hint-line">仅在有项目地址时开启每6小时自动检测。</div>
         <div id="docsWritebackTree" class="docs-tree"></div>
@@ -296,6 +297,11 @@
       </section>
 
     </main>
+
+    <div id="remoteSyncBanner" class="remote-sync-banner" hidden aria-live="polite">
+      <span id="remoteSyncBannerText">请检查改动文件是否正确</span>
+      <button id="remoteSyncCommitBtn" class="btn btn-strong" type="button">提交</button>
+    </div>
 
     <div id="repoHistoryBackdrop" class="repo-history-backdrop" aria-hidden="true"></div>
     <div id="repoHistoryOverlay" class="repo-history-overlay" aria-hidden="true">

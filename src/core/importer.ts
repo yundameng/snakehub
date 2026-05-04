@@ -1,6 +1,6 @@
 import path from "node:path";
 import { ensureHubLayout, getHubRoot, hubPaths } from "./config";
-import { copyRecursive, ensureDir, isDirectory } from "./fs-utils";
+import { copyRecursive, ensureDir, isDirectory, removePath } from "./fs-utils";
 import { fingerprintPath } from "./fingerprint";
 import { inferResourceName, slugifyName } from "./resource-utils";
 import { loadState, newId, nowIso, pushOperation, pushResource, saveState } from "./state";
@@ -15,10 +15,16 @@ function storeRootForType(type: ResourceType, root: string): string {
   return p.commandsStore;
 }
 
+function sourceRootForType(type: ResourceType, root: string): string {
+  const p = hubPaths(root);
+  return path.join(p.storeSource, type);
+}
+
 export async function importResource(input: {
   sourcePath: string;
   type: ResourceType;
   name?: string;
+  sourceRelativePath?: string;
   root?: string;
 }): Promise<{ reused: boolean; resource: ResourceRecord }> {
   const root = input.root ?? getHubRoot();
@@ -39,13 +45,29 @@ export async function importResource(input: {
 
   const id = newId(input.type.slice(0, -1));
   const slug = slugifyName(chosenName) || id;
-  const storeDir = path.join(storeRootForType(input.type, root), `${id}-${slug}`);
-  await ensureDir(storeDir);
+  const storeRuntimeDir = path.join(storeRootForType(input.type, root), `${id}-${slug}`);
+  const sourceRelative = String(input.sourceRelativePath || "").trim();
+  const storeSourceDir = sourceRelative
+    ? path.join(hubPaths(root).storeSource, sourceRelative)
+    : path.join(sourceRootForType(input.type, root), slug);
+  await ensureDir(storeRuntimeDir);
+  await ensureDir(path.dirname(storeSourceDir));
 
   if (await isDirectory(absSource)) {
-    await copyRecursive(absSource, storeDir);
+    await copyRecursive(absSource, storeRuntimeDir);
+    if (await isDirectory(storeSourceDir).catch(() => false)) {
+      await removePath(storeSourceDir);
+    }
+    await copyRecursive(absSource, storeSourceDir);
   } else {
-    await copyRecursive(absSource, path.join(storeDir, path.basename(absSource)));
+    await copyRecursive(absSource, path.join(storeRuntimeDir, path.basename(absSource)));
+    if (sourceRelative && path.extname(sourceRelative)) {
+      await removePath(storeSourceDir).catch(() => undefined);
+      await copyRecursive(absSource, storeSourceDir);
+    } else {
+      await removePath(storeSourceDir).catch(() => undefined);
+      await copyRecursive(absSource, path.join(storeSourceDir, path.basename(absSource)));
+    }
   }
 
   const resource: ResourceRecord = {
@@ -54,7 +76,7 @@ export async function importResource(input: {
     name: chosenName,
     fingerprint,
     sourcePath: absSource,
-    storePath: storeDir,
+    storePath: storeRuntimeDir,
     createdAt: nowIso(),
   };
 

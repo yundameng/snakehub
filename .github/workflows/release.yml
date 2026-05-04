@@ -1,0 +1,41 @@
+name: Build And Publish macOS Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build macOS Artifacts
+        env:
+          SKIP_NOTARIZE: "1"
+        run: npm run dist:mac
+
+      - name: Upload Artifacts To GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+            release/builder-effective-config.yaml

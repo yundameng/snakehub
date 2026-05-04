@@ -31,8 +31,12 @@ const el = {
   docsWritebackPathDisplay: document.getElementById("docsWritebackPathDisplay"),
   docsDetectBtn: document.getElementById("docsDetectBtn"),
   docsApplyBtn: document.getElementById("docsApplyBtn"),
+  docsRemoteSyncBtn: document.getElementById("docsRemoteSyncBtn"),
   docsWritebackMeta: document.getElementById("docsWritebackMeta"),
   docsWritebackTree: document.getElementById("docsWritebackTree"),
+  remoteSyncBanner: document.getElementById("remoteSyncBanner"),
+  remoteSyncBannerText: document.getElementById("remoteSyncBannerText"),
+  remoteSyncCommitBtn: document.getElementById("remoteSyncCommitBtn"),
   resourceImportPanel: document.getElementById("resourceImportPanel"),
   resourceImportTabs: document.getElementById("resourceImportTabs"),
   resourceImportCurrentTitle: document.getElementById("resourceImportCurrentTitle"),
@@ -175,6 +179,15 @@ let docsWritebackDetecting = false;
 let docsWritebackApplying = false;
 let docsWritebackLastDetectedAt = 0;
 let docsWritebackAutoTimer = 0;
+let docsWritebackGitEnv = {
+  projectPath: "",
+  isGitRepo: false,
+  hasRemote: false,
+  repoRoot: "",
+  remoteUrl: "",
+};
+let remoteSyncPendingContext = null;
+let remoteSyncSubmitting = false;
 let logDrawerExpanded = false;
 let activeModule = "overview";
 let moduleNavIndicatorRaf = 0;
@@ -185,6 +198,10 @@ let terminalRunning = false;
 let removeTerminalDataListener = null;
 let removeTerminalExitListener = null;
 let resourceImportDragDepth = 0;
+let terminalShell = "";
+let terminalDataBuffer = "";
+let pendingRepoScanAfterTerminal = null;
+const REPO_SCAN_DONE_MARKER = "__COWHUB_REPO_SCAN_DONE__:";
 
 function isRepoGroupOnlyType(type) {
   if (type === "hooks") return true;
@@ -323,10 +340,26 @@ function updateRepoHistoryOverlayLayout() {
   const right = Math.max(8, Math.round(window.innerWidth - rightEdge));
   const maxHeightByViewport = window.innerHeight - top - 8;
   const height = Math.max(280, Math.min(rawHeight, maxHeightByViewport));
+
+  const badgeRect =
+    el.repoHistoryBadge instanceof HTMLElement ? el.repoHistoryBadge.getBoundingClientRect() : null;
+  const badgeCenterX = badgeRect ? badgeRect.left + badgeRect.width / 2 : left + width;
+  const badgeCenterY = badgeRect ? badgeRect.top + badgeRect.height / 2 : top;
+  const originX = Math.max(0, Math.min(width, badgeCenterX - left));
+  const originY = Math.max(0, Math.min(height, badgeCenterY - top));
+  const scaleX = badgeRect ? Math.max(0.05, Math.min(1, badgeRect.width / width)) : 0.09;
+  const scaleY = badgeRect ? Math.max(0.08, Math.min(1, badgeRect.height / height)) : 0.58;
+
   el.repoHistoryOverlay.style.setProperty("--repo-overlay-top", `${top}px`);
   el.repoHistoryOverlay.style.setProperty("--repo-overlay-right", `${right}px`);
   el.repoHistoryOverlay.style.setProperty("--repo-overlay-width", `${width}px`);
   el.repoHistoryOverlay.style.setProperty("--repo-overlay-height", `${height}px`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-origin-x", `${originX}px`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-origin-y", `${originY}px`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-scale-x", `${scaleX}`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-scale-y", `${scaleY}`);
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-from-x", "0px");
+  el.repoHistoryOverlay.style.setProperty("--repo-overlay-from-y", "0px");
 }
 
 function openRepoHistoryOverlay() {
@@ -532,18 +565,85 @@ function setTerminalOpen(nextOpen) {
   }
 }
 
+function isWindowsShell(shellPath) {
+  const normalized = String(shellPath || "").toLowerCase();
+  return normalized.includes("cmd.exe") || normalized.endsWith("\\cmd") || normalized.endsWith("/cmd");
+}
+
+function wrapTerminalCommandWithDoneMarker(command) {
+  const text = String(command || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (isWindowsShell(terminalShell)) {
+    return `${text} & echo ${REPO_SCAN_DONE_MARKER}%errorlevel%`;
+  }
+  return `${text}; __cowhub_code=$?; echo ${REPO_SCAN_DONE_MARKER}$__cowhub_code`;
+}
+
+async function runRepoScanAfterTerminal(payload) {
+  const requestPayload = {
+    ...payload,
+    rulesCanonicalValidation: Boolean(el.repoRulesCanonical && el.repoRulesCanonical.checked),
+  };
+  const result = await api("/api/repo/scan", {
+    method: "POST",
+    body: JSON.stringify(requestPayload),
+  });
+  applyRepoScanResult(result.result, "终端 git clone 后自动扫描");
+  log(`仓库扫描完成：${repoScanState.candidates.length} 项，已默认全选可选项（docs 如存在为必选）`);
+}
+
+async function handleTerminalDataPayload(payload) {
+  const chunk = payload && payload.data ? String(payload.data) : "";
+  if (!chunk) {
+    return;
+  }
+  appendTerminalOutput(chunk);
+  terminalDataBuffer = `${terminalDataBuffer}${chunk}`.slice(-4096);
+
+  const markerIndex = terminalDataBuffer.lastIndexOf(REPO_SCAN_DONE_MARKER);
+  if (markerIndex === -1) {
+    return;
+  }
+  const tail = terminalDataBuffer.slice(markerIndex + REPO_SCAN_DONE_MARKER.length);
+  const match = tail.match(/^(\d+)/);
+  if (!match) {
+    return;
+  }
+  const exitCode = Number(match[1] || "1");
+  terminalDataBuffer = "";
+
+  if (!pendingRepoScanAfterTerminal) {
+    return;
+  }
+  const pending = pendingRepoScanAfterTerminal;
+  pendingRepoScanAfterTerminal = null;
+
+  if (exitCode !== 0) {
+    log(`终端回退命令执行失败（exit=${exitCode}），请在终端修复后重试扫描。`);
+    return;
+  }
+  try {
+    await runRepoScanAfterTerminal(pending);
+  } catch (error) {
+    log(`终端回退后自动扫描失败：${getErrorMessage(error)}`);
+  }
+}
+
 function bindTerminalListeners() {
   if (!window.cowhubDesktop) {
     return;
   }
   if (typeof window.cowhubDesktop.onTerminalData === "function" && !removeTerminalDataListener) {
     removeTerminalDataListener = window.cowhubDesktop.onTerminalData((payload) => {
-      appendTerminalOutput(payload && payload.data ? payload.data : "");
+      handleTerminalDataPayload(payload).catch(() => undefined);
     });
   }
   if (typeof window.cowhubDesktop.onTerminalExit === "function" && !removeTerminalExitListener) {
     removeTerminalExitListener = window.cowhubDesktop.onTerminalExit((payload) => {
       terminalRunning = false;
+      pendingRepoScanAfterTerminal = null;
       const code = payload && typeof payload.code === "number" ? payload.code : 0;
       const signal = payload && payload.signal ? String(payload.signal) : "";
       appendTerminalOutput(`\n[terminal exited] code=${code}${signal ? ` signal=${signal}` : ""}\n`);
@@ -564,6 +664,7 @@ async function ensureTerminalStarted() {
     const result = await window.cowhubDesktop.terminalStart();
     terminalRunning = true;
     const shell = result && result.shell ? String(result.shell) : "";
+    terminalShell = shell;
     appendTerminalOutput(`[terminal started] ${shell || "shell"}\n`);
     return true;
   } catch (error) {
@@ -642,7 +743,7 @@ async function buildGitCloneCommand(input) {
     targetPath = "~/.snakehub/repos/repo-fallback";
   }
   if (!repoUrl) {
-    return "";
+    return { command: "", targetPath: "" };
   }
   let cloneCommand = "git clone";
   if (ref) {
@@ -650,9 +751,12 @@ async function buildGitCloneCommand(input) {
   }
   cloneCommand += ` ${shellEscape(repoUrl)}`;
   if (!targetPath) {
-    return cloneCommand;
+    return { command: cloneCommand, targetPath: "" };
   }
-  return `mkdir -p ${shellEscape(targetPath)} && cd ${shellEscape(targetPath)} && ${cloneCommand}`;
+  return {
+    command: `mkdir -p ${shellEscape(targetPath)} && cd ${shellEscape(targetPath)} && ${cloneCommand}`,
+    targetPath,
+  };
 }
 
 async function fallbackRepoScanByTerminalClone(payload, errorMessage) {
@@ -662,7 +766,8 @@ async function fallbackRepoScanByTerminalClone(payload, errorMessage) {
   if (!shouldFallbackToTerminalClone(errorMessage)) {
     return false;
   }
-  const command = await buildGitCloneCommand(payload);
+  const built = await buildGitCloneCommand(payload);
+  const command = built.command;
   if (!command) {
     return false;
   }
@@ -672,12 +777,21 @@ async function fallbackRepoScanByTerminalClone(payload, errorMessage) {
     return false;
   }
 
+  const wrappedCommand = wrapTerminalCommandWithDoneMarker(command);
+  if (!wrappedCommand) {
+    return false;
+  }
   setTerminalOpen(true);
   appendTerminalOutput(`\n[fallback] 检测到权限问题，尝试使用本地终端执行 git clone：\n$ ${command}\n`);
+  pendingRepoScanAfterTerminal = {
+    ...payload,
+    targetPath: String(payload.targetPath || "").trim() || built.targetPath,
+  };
   try {
-    await window.cowhubDesktop.terminalWrite(`${command}\n`);
+    await window.cowhubDesktop.terminalWrite(`${wrappedCommand}\n`);
     return true;
   } catch (error) {
+    pendingRepoScanAfterTerminal = null;
     appendTerminalOutput(`[fallback write error] ${getErrorMessage(error)}\n`);
     return false;
   }
@@ -819,6 +933,74 @@ async function saveDocsWritebackProjectPathToServer(pathValue) {
   }
 }
 
+async function detectDocsWritebackGitEnv(projectPath, { silent = true } = {}) {
+  const normalized = String(projectPath || "").trim();
+  if (!normalized) {
+    docsWritebackGitEnv = {
+      projectPath: "",
+      isGitRepo: false,
+      hasRemote: false,
+      repoRoot: "",
+      remoteUrl: "",
+    };
+    renderDocsWritebackModule();
+    return docsWritebackGitEnv;
+  }
+  try {
+    const result = await api("/api/project/git-env", {
+      method: "POST",
+      body: JSON.stringify({ projectPath: normalized }),
+    });
+    const payload = result.result || {};
+    docsWritebackGitEnv = {
+      projectPath: normalized,
+      isGitRepo: Boolean(payload.isGitRepo),
+      hasRemote: Boolean(payload.hasRemote),
+      repoRoot: String(payload.repoRoot || ""),
+      remoteUrl: String(payload.remoteUrl || ""),
+    };
+    if (!silent) {
+      if (docsWritebackGitEnv.isGitRepo && docsWritebackGitEnv.hasRemote) {
+        log(`检测到 Git 远端仓库：${docsWritebackGitEnv.remoteUrl || docsWritebackGitEnv.repoRoot}`);
+      } else if (docsWritebackGitEnv.isGitRepo) {
+        log("当前项目是 Git 仓库，但未检测到 origin 远端。");
+      } else {
+        log("当前项目目录未检测到 Git 环境。");
+      }
+    }
+  } catch (error) {
+    docsWritebackGitEnv = {
+      projectPath: normalized,
+      isGitRepo: false,
+      hasRemote: false,
+      repoRoot: "",
+      remoteUrl: "",
+    };
+    if (!silent) {
+      log(`检测 Git 环境失败：${getErrorMessage(error)}`);
+    }
+  }
+  renderDocsWritebackModule();
+  return docsWritebackGitEnv;
+}
+
+function hideRemoteSyncBanner() {
+  remoteSyncPendingContext = null;
+  if (el.remoteSyncBanner) {
+    el.remoteSyncBanner.hidden = true;
+  }
+}
+
+function showRemoteSyncBanner(message, context) {
+  if (el.remoteSyncBannerText) {
+    el.remoteSyncBannerText.textContent = String(message || "请检查改动文件是否正确");
+  }
+  if (el.remoteSyncBanner) {
+    el.remoteSyncBanner.hidden = false;
+  }
+  remoteSyncPendingContext = context || null;
+}
+
 function renderDocsWritebackTreeNodes(nodes) {
   if (!Array.isArray(nodes) || nodes.length === 0) {
     return `
@@ -843,11 +1025,13 @@ function renderDocsWritebackTreeNodes(nodes) {
             `;
           }
           const changedTag = node.changed ? `<span class="asset-tag docs-changed-tag">已改动</span>` : "";
+          const projectChangedTag = node.projectChanged ? `<span class="asset-tag docs-project-changed-tag">项目目录有改动</span>` : "";
           const projectOnlyClass = node.projectOnly ? " docs-project-only-name" : "";
           return `
             <li class="docs-tree-node docs-tree-file">
               <span class="mono${projectOnlyClass}">${nameText}</span>
               ${changedTag}
+              ${projectChangedTag}
             </li>
           `;
         })
@@ -865,6 +1049,7 @@ function renderDocsWritebackModule() {
   el.docsWritebackPathDisplay.title = docsWritebackProjectPath || "--";
 
   if (!docsWritebackProjectPath) {
+    hideRemoteSyncBanner();
     el.docsWritebackSummary.textContent = "未就绪";
     el.docsWritebackMeta.textContent = "请先使用“GitLab 下载并导入中心仓库（内部）”或“从本地路径导入 > 技能仓库导入”生成项目地址。";
     el.docsWritebackTree.innerHTML = `<div class="asset-empty">当前无项目地址。</div>`;
@@ -878,20 +1063,23 @@ function renderDocsWritebackModule() {
     const changedCount = Array.isArray(docsWritebackDetection.changedFiles)
       ? docsWritebackDetection.changedFiles.length
       : 0;
+    const projectChangedCount = Array.isArray(docsWritebackDetection.projectChangedFiles)
+      ? docsWritebackDetection.projectChangedFiles.length
+      : 0;
     const projectOnlyCount = Array.isArray(docsWritebackDetection.projectOnlyFiles)
       ? docsWritebackDetection.projectOnlyFiles.length
       : 0;
-    if (changedCount === 0 && projectOnlyCount === 0) {
+    if (changedCount === 0 && projectChangedCount === 0 && projectOnlyCount === 0) {
       el.docsWritebackSummary.textContent = "已同步";
     } else {
-      el.docsWritebackSummary.textContent = `待同步 ${changedCount + projectOnlyCount}`;
+      el.docsWritebackSummary.textContent = `待同步 ${changedCount + projectChangedCount + projectOnlyCount}`;
     }
   } else {
     el.docsWritebackSummary.textContent = "待检测";
   }
 
   if (!docsWritebackDetection) {
-    el.docsWritebackMeta.textContent = "尚未检测。该项目地址每6小时会自动检测一次 docs 是否改动。";
+    el.docsWritebackMeta.textContent = "尚未检测。该项目地址每6小时会自动检测一次中心仓库目录改动。";
     el.docsWritebackTree.innerHTML = `<div class="asset-empty">点击“检测 docs 改动”开始比对。</div>`;
     updateDocsWritebackButtonsState();
     return;
@@ -900,6 +1088,9 @@ function renderDocsWritebackModule() {
   const changedCount = Array.isArray(docsWritebackDetection.changedFiles)
     ? docsWritebackDetection.changedFiles.length
     : 0;
+  const projectChangedCount = Array.isArray(docsWritebackDetection.projectChangedFiles)
+    ? docsWritebackDetection.projectChangedFiles.length
+    : 0;
   const projectOnlyCount = Array.isArray(docsWritebackDetection.projectOnlyFiles)
     ? docsWritebackDetection.projectOnlyFiles.length
     : 0;
@@ -907,14 +1098,16 @@ function renderDocsWritebackModule() {
     ? new Date(docsWritebackLastDetectedAt).toLocaleString()
     : "未检测";
   el.docsWritebackMeta.textContent =
-    `中心仓库 docs：${docsWritebackDetection.docsStorePath || "-"} | ` +
-    `项目 docs：${docsWritebackDetection.projectDocsPath || "-"} | ` +
-    `中心改动：${changedCount} | 项目新增：${projectOnlyCount} | 最近检测：${lastDetectedText}`;
+    `中心仓库目录(source)：${docsWritebackDetection.docsStorePath || "-"} | ` +
+    `中心仓库目录(runtime)：${docsWritebackDetection.runtimeStorePath || "-"} | ` +
+    `项目目录：${docsWritebackDetection.projectDocsPath || "-"} | ` +
+    `Git远端：${docsWritebackGitEnv.isGitRepo ? (docsWritebackGitEnv.hasRemote ? "是" : "否") : "否"} | ` +
+    `中心改动：${changedCount} | 项目改动：${projectChangedCount} | 项目新增：${projectOnlyCount} | 最近检测：${lastDetectedText}`;
 
   const treeHtml = renderDocsWritebackTreeNodes(Array.isArray(docsWritebackDetection.tree) ? docsWritebackDetection.tree : []);
   el.docsWritebackTree.innerHTML = `
     <div class="docs-tree-root">
-      <div class="mono docs-tree-root-title">docs/</div>
+      <div class="mono docs-tree-root-title">store/</div>
       ${treeHtml}
     </div>
   `;
@@ -927,6 +1120,17 @@ function updateDocsWritebackButtonsState() {
   }
   if (el.docsApplyBtn) {
     el.docsApplyBtn.disabled = !docsWritebackProjectPath || docsWritebackDetecting || docsWritebackApplying;
+  }
+  if (el.docsRemoteSyncBtn) {
+    const enabled =
+      Boolean(docsWritebackProjectPath) &&
+      docsWritebackGitEnv.isGitRepo &&
+      docsWritebackGitEnv.hasRemote &&
+      !docsWritebackDetecting &&
+      !docsWritebackApplying &&
+      !remoteSyncSubmitting;
+    el.docsRemoteSyncBtn.hidden = !Boolean(docsWritebackProjectPath) || !docsWritebackGitEnv.isGitRepo || !docsWritebackGitEnv.hasRemote;
+    el.docsRemoteSyncBtn.disabled = !enabled;
   }
 }
 
@@ -954,6 +1158,9 @@ function setDocsWritebackProjectPath(pathValue, sourceLabel = "", options = {}) 
   if (normalized === docsWritebackProjectPath) {
     syncDocsWritebackAutoTimer();
     renderDocsWritebackModule();
+    if (normalized && docsWritebackGitEnv.projectPath !== normalized) {
+      detectDocsWritebackGitEnv(normalized, { silent: true });
+    }
     if (detectNow && normalized) {
       detectDocsWritebackChanges("auto");
     }
@@ -963,6 +1170,7 @@ function setDocsWritebackProjectPath(pathValue, sourceLabel = "", options = {}) 
   docsWritebackProjectPath = normalized;
   docsWritebackDetection = null;
   docsWritebackLastDetectedAt = 0;
+  hideRemoteSyncBanner();
   saveDocsWritebackProjectPath(docsWritebackProjectPath);
   if (persistServer) {
     saveDocsWritebackProjectPathToServer(docsWritebackProjectPath);
@@ -973,6 +1181,17 @@ function setDocsWritebackProjectPath(pathValue, sourceLabel = "", options = {}) 
   if (!silentLog && docsWritebackProjectPath) {
     const sourcePrefix = sourceLabel ? `${sourceLabel}：` : "";
     log(`${sourcePrefix}docs文档回写项目地址已更新：${docsWritebackProjectPath}`);
+  }
+  if (docsWritebackProjectPath) {
+    detectDocsWritebackGitEnv(docsWritebackProjectPath, { silent: true });
+  } else {
+    docsWritebackGitEnv = {
+      projectPath: "",
+      isGitRepo: false,
+      hasRemote: false,
+      repoRoot: "",
+      remoteUrl: "",
+    };
   }
   if (detectNow && docsWritebackProjectPath) {
     detectDocsWritebackChanges("auto");
@@ -1010,13 +1229,16 @@ async function detectDocsWritebackChanges(trigger = "manual") {
     const changedCount = Array.isArray(docsWritebackDetection && docsWritebackDetection.changedFiles)
       ? docsWritebackDetection.changedFiles.length
       : 0;
+    const projectChangedCount = Array.isArray(docsWritebackDetection && docsWritebackDetection.projectChangedFiles)
+      ? docsWritebackDetection.projectChangedFiles.length
+      : 0;
     const projectOnlyCount = Array.isArray(docsWritebackDetection && docsWritebackDetection.projectOnlyFiles)
       ? docsWritebackDetection.projectOnlyFiles.length
       : 0;
     if (trigger === "manual") {
-      log(`docs 检测完成：中心改动 ${changedCount}，项目新增 ${projectOnlyCount}`);
-    } else if (changedCount > 0 || projectOnlyCount > 0) {
-      log(`自动检测到 docs 待同步：中心改动 ${changedCount}，项目新增 ${projectOnlyCount}`);
+      log(`docs 检测完成：中心改动 ${changedCount}，项目改动 ${projectChangedCount}，项目新增 ${projectOnlyCount}`);
+    } else if (changedCount > 0 || projectChangedCount > 0 || projectOnlyCount > 0) {
+      log(`自动检测到 docs 待同步：中心改动 ${changedCount}，项目改动 ${projectChangedCount}，项目新增 ${projectOnlyCount}`);
     }
   } catch (error) {
     if (trigger === "manual") {
@@ -1064,6 +1286,115 @@ async function applyDocsWriteback() {
     docsWritebackApplying = false;
     updateDocsWritebackButtonsState();
     renderDocsWritebackModule();
+  }
+}
+
+async function onDocsRemoteSync() {
+  if (!docsWritebackProjectPath) {
+    log("请先通过仓库导入功能生成项目地址");
+    return;
+  }
+  if (docsWritebackDetecting || docsWritebackApplying || remoteSyncSubmitting) {
+    return;
+  }
+
+  remoteSyncSubmitting = true;
+  updateDocsWritebackButtonsState();
+  try {
+    const gitEnv = await detectDocsWritebackGitEnv(docsWritebackProjectPath, { silent: true });
+    if (!gitEnv.isGitRepo || !gitEnv.hasRemote) {
+      log("当前项目未检测到可用的 Git 远端仓库，无法执行远端同步。");
+      return;
+    }
+
+    const result = await api("/api/docs-writeback/remote-prepare", {
+      method: "POST",
+      body: JSON.stringify({ projectPath: docsWritebackProjectPath }),
+    });
+    const payload = result.result || {};
+    const hasSyncableFiles = Boolean(payload.hasSyncableFiles);
+    const storeChangedFiles = Array.isArray(payload.storeChangedFiles) ? payload.storeChangedFiles : [];
+    const unsyncedFiles = Array.isArray(payload.unsyncedFiles) ? payload.unsyncedFiles : [];
+    const syncedToProjectFiles = Array.isArray(payload.syncedToProjectFiles) ? payload.syncedToProjectFiles : [];
+
+    docsWritebackDetection = payload.detection || docsWritebackDetection;
+    docsWritebackLastDetectedAt = Date.now();
+    renderDocsWritebackModule();
+
+    if (!hasSyncableFiles || storeChangedFiles.length === 0) {
+      log("当前无可同步文件");
+      return;
+    }
+
+    if (unsyncedFiles.length > 0) {
+      log(`已将中心仓库改动同步到项目目录：${syncedToProjectFiles.length} 个文件`);
+    } else {
+      log(`检测到中心仓库改动 ${storeChangedFiles.length} 个文件，项目目录已是最新，跳过覆盖同步`);
+    }
+
+    const started = await ensureTerminalStarted();
+    if (!started || !window.cowhubDesktop || typeof window.cowhubDesktop.terminalWrite !== "function") {
+      log("终端不可用，无法继续执行远端仓库同步。");
+      return;
+    }
+    const repoRoot = gitEnv.repoRoot || docsWritebackProjectPath;
+    setTerminalOpen(true);
+    const statusCommand = `cd ${shellEscape(repoRoot)} && git status`;
+    appendTerminalOutput(`$ ${statusCommand}\n`);
+    await window.cowhubDesktop.terminalWrite(`${statusCommand}\n`);
+    showRemoteSyncBanner("请检查改动文件是否正确", {
+      repoRoot,
+    });
+    log("请检查改动文件是否正确，确认后点击页面顶部横幅中的“提交”。");
+  } catch (error) {
+    log(`同步到远端仓库失败：${getErrorMessage(error)}`);
+  } finally {
+    remoteSyncSubmitting = false;
+    updateDocsWritebackButtonsState();
+  }
+}
+
+async function onRemoteSyncCommit() {
+  if (!remoteSyncPendingContext || remoteSyncSubmitting) {
+    return;
+  }
+  remoteSyncSubmitting = true;
+  if (el.remoteSyncCommitBtn) {
+    el.remoteSyncCommitBtn.disabled = true;
+  }
+  updateDocsWritebackButtonsState();
+  try {
+    const started = await ensureTerminalStarted();
+    if (!started || !window.cowhubDesktop || typeof window.cowhubDesktop.terminalWrite !== "function") {
+      log("终端不可用，无法提交到远端仓库。");
+      return;
+    }
+    const repoRoot = String(remoteSyncPendingContext.repoRoot || docsWritebackProjectPath || "").trim();
+    if (!repoRoot) {
+      log("缺少项目路径，无法执行 Git 提交。");
+      return;
+    }
+    setTerminalOpen(true);
+    const commands = [
+      `cd ${shellEscape(repoRoot)}`,
+      "git add .",
+      "git commit -m '同步修改'",
+      "git push",
+    ];
+    for (const command of commands) {
+      appendTerminalOutput(`$ ${command}\n`);
+      await window.cowhubDesktop.terminalWrite(`${command}\n`);
+    }
+    hideRemoteSyncBanner();
+    log("已在终端依次执行 git add / git commit / git push，请关注执行结果。");
+  } catch (error) {
+    log(`远端提交失败：${getErrorMessage(error)}`);
+  } finally {
+    remoteSyncSubmitting = false;
+    if (el.remoteSyncCommitBtn) {
+      el.remoteSyncCommitBtn.disabled = false;
+    }
+    updateDocsWritebackButtonsState();
   }
 }
 
@@ -1130,6 +1461,39 @@ function expectedRuleExtensionForTool(toolId) {
   if (toolId === "codex") return ".rules";
   if (toolId === "opencow") return ".md";
   return "";
+}
+
+function detectRuleBucketByText(value) {
+  const normalized = String(value || "").trim().toLowerCase().replaceAll("\\", "/");
+  if (!normalized) {
+    return "";
+  }
+  const tagged = normalized.match(/\[(api_tools|vue_tools|mini_tools)\]/);
+  if (tagged && tagged[1]) {
+    return tagged[1];
+  }
+  for (const bucket of ["api_tools", "vue_tools", "mini_tools"]) {
+    if (
+      normalized.includes(`/${bucket}/`) ||
+      normalized.includes(`-${bucket}`) ||
+      normalized.includes(`_${bucket}`) ||
+      normalized.endsWith(bucket)
+    ) {
+      return bucket;
+    }
+  }
+  return "";
+}
+
+function detectRuleBucketForResource(resource) {
+  if (!resource || resource.type !== "rules") {
+    return "";
+  }
+  return (
+    detectRuleBucketByText(resource.name) ||
+    detectRuleBucketByText(resource.sourcePath) ||
+    detectRuleBucketByText(resource.storePath)
+  );
 }
 
 function setLatestLogPreview(text) {
@@ -1451,6 +1815,9 @@ async function detectLinkProjectType(projectPath) {
     }
     linkProjectDetecting = false;
     updateLinkRulesHint();
+    if (currentOverview && currentOverview.state) {
+      renderResourceOptions(currentOverview.state.resources || []);
+    }
     updateLinkCreateButtonState();
   }
 }
@@ -1931,6 +2298,7 @@ function renderResourceOptions(resources) {
       .filter((resource) => resource.type !== "rules" && previousValues.has(resource.id))
       .map((resource) => resource.id),
   );
+  const incompatibleRuleIds = new Set();
   if (nextSelectionSet.size === 0) {
     const firstNonRule = filtered.find((resource) => resource.type !== "rules");
     if (firstNonRule) {
@@ -1940,6 +2308,16 @@ function renderResourceOptions(resources) {
 
   const expectedRuleTool = selectedToolId || "";
   for (const ruleItem of grouped.rules) {
+    const ruleBucket = detectRuleBucketForResource(ruleItem);
+    const bucketMismatch =
+      Boolean(currentLinkScopePath) &&
+      Boolean(currentLinkRulesBucket) &&
+      Boolean(ruleBucket) &&
+      ruleBucket !== currentLinkRulesBucket;
+    if (bucketMismatch) {
+      incompatibleRuleIds.add(ruleItem.id);
+      continue;
+    }
     const pathValue = String(ruleItem.sourcePath || ruleItem.storePath || ruleItem.path || "");
     const detectedTool = detectRuleToolByPath(pathValue);
     if (detectedTool && detectedTool === expectedRuleTool) {
@@ -1959,12 +2337,17 @@ function renderResourceOptions(resources) {
       const list = grouped[type];
       const rows = list
         .map((r) => {
+          const incompatibleRule = r.type === "rules" && incompatibleRuleIds.has(r.id);
           const checked = nextSelectionSet.has(r.id) ? "checked" : "";
+          const disabled = incompatibleRule ? "disabled" : "";
           const ruleToolBadge = renderRuleToolBadgeByPath(r.type, String(r.sourcePath || r.storePath || ""));
+          const incompatibleTag = incompatibleRule
+            ? ` <span class="asset-tag">不匹配 ${escapeHtml(currentLinkRulesBucket || "")}</span>`
+            : "";
           return `
             <label class="resource-check-item">
-              <input type="checkbox" name="resourceTokens" value="${escapeHtml(r.id)}" ${checked} />
-              <span>${escapeHtml(r.name)}${ruleToolBadge}</span>
+              <input type="checkbox" name="resourceTokens" value="${escapeHtml(r.id)}" ${checked} ${disabled} />
+              <span>${escapeHtml(r.name)}${ruleToolBadge}${incompatibleTag}</span>
             </label>
           `;
         })
@@ -3193,6 +3576,11 @@ async function onLinkSubmitSingle() {
     if (failed.length > 0 && successCount === 0) {
       log("多选链接未成功，请检查上方错误日志");
     }
+    if (successCount > 0 && currentLinkScopePath && currentBrowserScopePath !== currentLinkScopePath) {
+      currentBrowserScopePath = currentLinkScopePath;
+      renderScopeInputs();
+      log(`已自动切换“工具目录浏览器”范围到当前链接项目：${currentLinkScopePath}`);
+    }
     if (successCount > 0 || failed.length > 0) {
       await refreshOverview("auto");
     }
@@ -3278,6 +3666,11 @@ async function onLinkAllRun() {
       log(summary.rulesCompanionNotice);
     } else if (summary.rulesCompanions && summary.rulesCompanions.length > 0) {
       log(`检测到源地址有配置文件和规则文件：${summary.rulesCompanions.map((item) => item.name).join(", ")}，将跟随rules一起链接`);
+    }
+    if ((summary.linked || 0) > 0 && currentLinkScopePath && currentBrowserScopePath !== currentLinkScopePath) {
+      currentBrowserScopePath = currentLinkScopePath;
+      renderScopeInputs();
+      log(`已自动切换“工具目录浏览器”范围到当前链接项目：${currentLinkScopePath}`);
     }
     await refreshOverview("auto");
   } catch (error) {
@@ -3684,6 +4077,16 @@ function bindEvents() {
       applyDocsWriteback();
     });
   }
+  if (el.docsRemoteSyncBtn) {
+    el.docsRemoteSyncBtn.addEventListener("click", () => {
+      onDocsRemoteSync();
+    });
+  }
+  if (el.remoteSyncCommitBtn) {
+    el.remoteSyncCommitBtn.addEventListener("click", () => {
+      onRemoteSyncCommit();
+    });
+  }
   if (el.localImportTabs) {
     el.localImportTabs.addEventListener("click", (event) => {
       const target = event.target;
@@ -3803,6 +4206,9 @@ function bindEvents() {
     }
     if (logDrawerExpanded) {
       setLogDrawerExpanded(false);
+    }
+    if (el.remoteSyncBanner && !el.remoteSyncBanner.hidden) {
+      hideRemoteSyncBanner();
     }
   });
   if (el.operationRecords) {
@@ -3991,6 +4397,7 @@ async function boot() {
   docsWritebackProjectPath = loadDocsWritebackProjectPath();
   setLatestLogPreview("暂无日志");
   setLogDrawerExpanded(false);
+  hideRemoteSyncBanner();
   setTerminalOpen(false);
   const serverSavedPath = await loadDocsWritebackProjectPathFromServer();
   if (serverSavedPath) {
@@ -4002,6 +4409,9 @@ async function boot() {
   renderRepoHistoryCount();
   syncDocsWritebackAutoTimer();
   renderDocsWritebackModule();
+  if (docsWritebackProjectPath) {
+    detectDocsWritebackGitEnv(docsWritebackProjectPath, { silent: true });
+  }
   activateLocalImportTab("single");
   setResourceImportTab(activeResourceImportTab);
   bindEvents();

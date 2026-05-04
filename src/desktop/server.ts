@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { ensureHubLayout, getHubRoot, hubPaths } from "../core/config";
 import { detectProjectGlobalConflicts } from "../core/conflicts";
 import { loadDocsWritebackConfig, saveDocsWritebackConfig } from "../core/docs-writeback-config";
-import { applyDocsWritebackToProject, detectDocsWritebackChanges } from "../core/docs-writeback";
+import { applyDocsWritebackToProject, detectDocsWritebackChanges, prepareDocsWritebackRemoteSync } from "../core/docs-writeback";
 import { importFromRepo, inspectRepoForImport } from "../core/git-import";
 import { archiveHooksWithConfig, resolveHooksConfigSibling } from "../core/hooks-config";
 import { importResource } from "../core/importer";
@@ -87,6 +87,40 @@ function normalizeRepoValue(inputValue: string): string {
     return value;
   }
   return normalizeLocalPath(value);
+}
+
+async function runGitCommand(args: string[], cwd: string): Promise<string> {
+  const result = await execFileAsync("git", args, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 5 * 1024 * 1024,
+  });
+  return String(result.stdout || "").trim();
+}
+
+async function detectGitEnvironment(projectPath: string): Promise<{
+  isGitRepo: boolean;
+  hasRemote: boolean;
+  repoRoot: string;
+  remoteUrl: string;
+}> {
+  const cwd = path.resolve(projectPath);
+  try {
+    const inside = await runGitCommand(["rev-parse", "--is-inside-work-tree"], cwd);
+    if (inside !== "true") {
+      return { isGitRepo: false, hasRemote: false, repoRoot: "", remoteUrl: "" };
+    }
+    const repoRoot = await runGitCommand(["rev-parse", "--show-toplevel"], cwd).catch(() => cwd);
+    const remoteUrl = await runGitCommand(["remote", "get-url", "origin"], cwd).catch(() => "");
+    return {
+      isGitRepo: true,
+      hasRemote: Boolean(remoteUrl),
+      repoRoot: String(repoRoot || cwd),
+      remoteUrl: String(remoteUrl || ""),
+    };
+  } catch {
+    return { isGitRepo: false, hasRemote: false, repoRoot: "", remoteUrl: "" };
+  }
 }
 
 interface LocalBatchCandidate {
@@ -257,6 +291,14 @@ async function detectProjectType(projectPath: string): Promise<DetectedProjectTy
     return "mini_program";
   }
 
+  // Prioritize PHP for mixed repositories that may include frontend tooling deps.
+  if (await hasAnyNamedFile(root, ["composer.json"])) {
+    return "php";
+  }
+  if (await hasFileWithExtensions(root, new Set([".php"]), 4)) {
+    return "php";
+  }
+
   const pkg = await readPackageJson(root);
   if (
     pkg &&
@@ -284,13 +326,6 @@ async function detectProjectType(projectPath: string): Promise<DetectedProjectTy
   }
   if (await hasFileWithExtensions(root, new Set([".vue"]), 4)) {
     return "vue";
-  }
-
-  if (await hasAnyNamedFile(root, ["composer.json"])) {
-    return "php";
-  }
-  if (await hasFileWithExtensions(root, new Set([".php"]), 4)) {
-    return "php";
   }
 
   return undefined;
@@ -1011,6 +1046,22 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     return;
   }
 
+  if (method === "POST" && urlPath === "/api/docs-writeback/remote-prepare") {
+    const body = await readJsonBody(req);
+    const projectPathRaw = String(body.projectPath ?? "").trim();
+    if (!projectPathRaw) {
+      throw new Error("projectPath is required.");
+    }
+    const projectPath = normalizeLocalPath(projectPathRaw);
+    const rootPath = getHubRoot();
+    const result = await prepareDocsWritebackRemoteSync({
+      projectPath,
+      rootPath,
+    });
+    jsonResponse(res, 200, { ok: true, result });
+    return;
+  }
+
   if (method === "POST" && urlPath === "/api/docs-writeback/apply") {
     const body = await readJsonBody(req);
     const projectPathRaw = String(body.projectPath ?? "").trim();
@@ -1024,6 +1075,24 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       rootPath,
     });
     jsonResponse(res, 200, { ok: true, result });
+    return;
+  }
+
+  if (method === "POST" && urlPath === "/api/project/git-env") {
+    const body = await readJsonBody(req);
+    const projectPathRaw = String(body.projectPath ?? "").trim();
+    if (!projectPathRaw) {
+      throw new Error("projectPath is required.");
+    }
+    const projectPath = normalizeLocalPath(projectPathRaw);
+    const gitEnv = await detectGitEnvironment(projectPath);
+    jsonResponse(res, 200, {
+      ok: true,
+      result: {
+        projectPath,
+        ...gitEnv,
+      },
+    });
     return;
   }
 

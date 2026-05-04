@@ -2,7 +2,12 @@
 
 `snakehub` 是一个本地中心仓库工具，把 `skills/hooks/rules/agents/commands` 托管到 `~/.snakehub`，并通过链接同步到不同 AI 工具目录，实现一处维护、全局复用。
 
-## 已实现能力
+## 下载桌面版（macOS）
+
+- 最新版本（推荐）：[GitHub Releases / latest](https://github.com/yundameng/snakehub/releases/latest)
+- 所有历史版本：[GitHub Releases](https://github.com/yundameng/snakehub/releases)
+
+## 已拥有能力
 
 - 核心
   - 初始化中心仓库目录结构
@@ -22,25 +27,37 @@
   - Git 仓库候选浏览与导入
   - 链接管理、路径覆盖管理、回滚操作
 
-## 目录结构
 
-```text
-~/.snakehub/
-  store/
-    skills/
-    hooks/
-    rules/
-    agents/
-    commands/
-  db/
-    state.json
-    tool-paths.json
-  backups/
-  links/
-  logs/
-```
+## 配套“中心仓库”结构
 
-## CLI 用法
+如果团队使用，建议用git仓库。仓库必须按照平台中目录结构实现：
+
+- skills
+  - xxx
+  - vue_tools
+  - mini_tools
+  - api_tools
+- rules
+  - xxx
+  - vue_tools
+  - mini_tools
+  - api_tools
+- hooks
+  - xxx
+  - vue_tools
+  - mini_tools
+  - api_tools
+- commands
+  - xxx
+  - vue_tools
+  - mini_tools
+  - api_tools
+- docs
+
+docs是存放技能需要的知识库文件，建议放「不需频繁修改的文件」，将需要频繁修改/不一定要同步给所有人用的文件放到「项目中docs目录下」。
+
+
+## CLI 用法（此用法只有基础功能）
 
 ```bash
 # 初始化
@@ -132,14 +149,42 @@ npm run desktop:web
 # 生成 .app 目录（开发验收）
 npm run dist:mac:dir
 
-# 生成 zip（推荐）
+# 生成 dmg（推荐，用于发给他人安装，打开后可拖到 Applications）
 npm run dist:mac
 
-# 生成 dmg
-npm run dist:mac:dmg
+# 生成 zip（仅用于调试/分发压缩包）
+npm run dist:mac:zip
 ```
 
 产物输出目录：`release/`
+
+### 发布到 GitHub 并提供下载
+
+`release/` 目录继续保持在 `.gitignore` 中，不直接提交到仓库。  
+对外下载通过 **GitHub Releases 附件** 提供。
+
+发布步骤：
+
+```bash
+# 1) 提交代码（不包含 release/）
+git add .
+git commit -m "release: v0.1.8"
+
+# 2) 打 tag（工作流监听 v*）
+git tag v0.1.8
+
+# 3) 推送分支和 tag
+git push origin main
+git push origin v0.1.8
+```
+
+仓库内已提供自动发布工作流：`.github/workflows/release.yml`  
+当你 push `v*` tag 后，GitHub Actions 会自动：
+- 在 macOS runner 上执行 `npm ci` + `npm run dist:mac`
+- 将 `release/` 下的 `.dmg/.zip/.blockmap/latest-mac.yml` 上传到对应 GitHub Release
+
+README 下载链接可长期使用：
+- `https://github.com/yundameng/snakehub/releases/latest`
 
 ### mac 签名与公证（notarization）
 
@@ -175,16 +220,17 @@ export APPLE_KEYCHAIN="login"
 
 然后执行：
 ```bash
-# 推荐，先打 zip 验证签名/公证流程
+# 推荐，直接打 dmg 作为对外分发安装包
 npm run dist:mac
 
-# 需要 dmg 再执行
-npm run dist:mac:dmg
+# 仅在需要 zip 时执行
+npm run dist:mac:zip
 ```
 
 说明：
 - 如果未配置上述公证凭据，构建会跳过 notarization（会有日志提示）。
-- `dmg` 目标对网络依赖更强，偶发失败时可先用 `dist:mac`（zip）。
+- `dmg` 是 macOS 标准拖拽安装包；只有打开 `.dmg` 才会出现“拖动到 Applications”安装界面。
+- `.zip` 解压后是直接运行 `.app`，不会出现“拖动到 Applications”的弹窗或安装引导。
 
 ## 适配器目录
 

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { getAdapterOrThrow } from "./adapters";
 import { ensureHubLayout, getHubRoot, hubPaths } from "./config";
-import { createDirLink, ensureDir, movePath, pathExists, removePath } from "./fs-utils";
+import { createDirLink, ensureDir, movePath, removePath } from "./fs-utils";
 import { loadState, newId, nowIso, pushMapping, pushOperation, saveState } from "./state";
 import { resolveTargetDir } from "./tool-paths";
 import { MappingRecord, ResourceRecord } from "./types";
@@ -12,6 +12,15 @@ function resolveLinkedTarget(linkPath: string, rawTarget: string): string {
     return path.resolve(rawTarget);
   }
   return path.resolve(path.dirname(linkPath), rawTarget);
+}
+
+async function entryExists(linkPath: string): Promise<boolean> {
+  try {
+    await fs.lstat(linkPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function resolveResourceOrThrow(state: { resources: ResourceRecord[] }, token: string): ResourceRecord {
@@ -70,7 +79,7 @@ export async function linkResource(input: {
 
   let backupPath: string | undefined;
 
-  if (await pathExists(linkPath)) {
+  if (await entryExists(linkPath)) {
     const stat = await fs.lstat(linkPath);
     if (stat.isSymbolicLink()) {
       const rawTarget = await fs.readlink(linkPath);
@@ -91,7 +100,7 @@ export async function linkResource(input: {
     await movePath(linkPath, nextBackupPath);
   }
 
-  if (await pathExists(linkPath)) {
+  if (await entryExists(linkPath)) {
     await removePath(linkPath);
   }
 
