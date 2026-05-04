@@ -24,6 +24,9 @@
     "dist:mac": "npm run build && electron-builder --mac dmg --publish never",
     "dist:mac:zip": "npm run build && electron-builder --mac zip --publish never",
     "dist:mac:dmg": "npm run build && electron-builder --mac dmg --publish never",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never",
+    "dist:win:nsis": "npm run build && electron-builder --win nsis --publish never",
+    "dist:win:portable": "npm run build && electron-builder --win portable --publish never",
     "prepack": "npm run build && node scripts/prepare-bin.cjs"
   },
   "keywords": [
@@ -60,6 +63,12 @@
       "target": [
         "dmg",
         "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
       ]
     }
   },

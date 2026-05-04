@@ -4,6 +4,8 @@
 
 ## 下载桌面版（macOS）
 
+找到对应版本，下载其中的dmg（macos）/exe（window）文件即可
+
 - 最新版本（推荐）：[GitHub Releases / latest](https://github.com/yundameng/snakehub/releases/latest)
 - 所有历史版本：[GitHub Releases](https://github.com/yundameng/snakehub/releases)
 
@@ -158,6 +160,23 @@ npm run dist:mac:zip
 
 产物输出目录：`release/`
 
+## 打包（Windows）
+
+```bash
+# 生成 Windows 安装包（nsis .exe）
+npm run dist:win
+
+# 等价命令（显式指定 nsis）
+npm run dist:win:nsis
+
+# 生成便携版（portable .exe）
+npm run dist:win:portable
+```
+
+说明：
+- Windows 打包建议在 Windows 环境执行（本地 Windows 或 GitHub Actions Windows runner）。
+- 产物同样输出到 `release/`。
+
 ### 发布到 GitHub 并提供下载
 
 `release/` 目录继续保持在 `.gitignore` 中，不直接提交到仓库。  
@@ -181,7 +200,8 @@ git push origin v0.1.8
 仓库内已提供自动发布工作流：`.github/workflows/release.yml`  
 当你 push `v*` tag 后，GitHub Actions 会自动：
 - 在 macOS runner 上执行 `npm ci` + `npm run dist:mac`
-- 将 `release/` 下的 `.dmg/.zip/.blockmap/latest-mac.yml` 上传到对应 GitHub Release
+- 在 Windows runner 上执行 `npm ci` + `npm run dist:win`
+- 将 `release/` 下的 macOS/Windows 安装包及更新元数据上传到对应 GitHub Release
 
 README 下载链接可长期使用：
 - `https://github.com/yundameng/snakehub/releases/latest`
